@@ -447,6 +447,10 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
           <button id="fitBtn" title="전체 보기">맞춤</button>
           <span class="lodlbl" id="lodLbl">요약</span>
         </div>
+        <div class="grp" role="group" aria-label="카드 표시">
+          <button id="tFull" aria-pressed="false" title="켜면 확대했을 때 카드에 Public 함수 전체를 보여요">함수 전체</button>
+          <button id="tStar" aria-pressed="false" title="★핵심으로 표시한 함수만 보기">★핵심만</button>
+        </div>
         <div class="grp" role="group" aria-label="관계선 표시">
           <span class="lodlbl lm" style="padding-left:10px;padding-right:2px">관계선</span>
           <button data-lm="sel" aria-pressed="true" title="선택하거나 마우스를 올린 매니저의 관계만">선택 시</button>
@@ -483,6 +487,7 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
         <select class="inp" id="tkind" aria-label="종류"><option value="">모든 종류</option><option value="method">메서드</option><option value="event">이벤트</option><option value="prop">프로퍼티</option></select>
         <select class="inp" id="tacc" aria-label="공개 범위"><option value="">모든 공개 범위</option><option value="public">Public</option><option value="internal">Internal</option></select>
         <label class="chk"><input type="checkbox" id="tunused"> 사용처 없는 Public만</label>
+        <label class="chk"><input type="checkbox" id="tstar"> ★핵심만</label>
         <span class="cnt" id="tcnt"></span>
       </div>
       <div class="tscroll">
@@ -881,12 +886,24 @@ async function setParent(id,p){
 
 /* ---------- transform / LOD ---------- */
 const lod=()=>T.k<0.55?'far':T.k<1.1?'mid':'near';
-let lastLod=lod();
+// zooming out still collapses cards to names, but full function lists only appear when the toggle is on
+const viewLod=()=>lod()==='far'?'far':S.fullFns?'near':'mid';
+S.fullFns=false;S.starOnly=false;
+try{S.fullFns=localStorage.getItem('mm.fullFns')==='1';S.starOnly=localStorage.getItem('mm.starOnly')==='1';}catch(e){}
+let lastLod=viewLod();
 function applyT(){world.style.transform=`translate(${T.x}px,${T.y}px) scale(${T.k})`;
   vp.style.backgroundPosition=`${T.x}px ${T.y}px`;vp.style.backgroundSize=`${24*T.k}px ${24*T.k}px`;
   $('#zLbl').textContent=Math.round(T.k*100)+'%';
-  const L=lod();$('#lodLbl').textContent={far:'이름만',mid:'요약',near:'전체 함수'}[L];
+  const L=viewLod();$('#lodLbl').textContent=S.starOnly&&L!=='far'?'★핵심':{far:'이름만',mid:'요약',near:'전체 함수'}[L];
   if(L!==lastLod){lastLod=L;renderNodes();}}
+function syncCardOpts(){$('#tFull').setAttribute('aria-pressed',S.fullFns);$('#tStar').setAttribute('aria-pressed',S.starOnly);$('#tstar').checked=S.starOnly;}
+function setCardOpt(key,on){S[key]=on;
+  try{localStorage.setItem(key==='fullFns'?'mm.fullFns':'mm.starOnly',on?'1':'0');}catch(e){}
+  syncCardOpts();applyT();renderNodes();if(S.view==='table')renderTable();}
+$('#tFull').onclick=()=>setCardOpt('fullFns',!S.fullFns);
+$('#tStar').onclick=()=>setCardOpt('starOnly',!S.starOnly);
+$('#tstar').onchange=e=>setCardOpt('starOnly',e.target.checked);
+syncCardOpts();
 function zoomAt(f,cx,cy){const r=vp.getBoundingClientRect();const px=cx-r.left,py=cy-r.top;
   const nk=Math.min(2.2,Math.max(.25,T.k*f));const wx=(px-T.x)/T.k,wy=(py-T.y)/T.k;
   T.k=nk;T.x=px-wx*nk;T.y=py-wy*nk;applyT();}
@@ -984,6 +1001,8 @@ function nodeHTML(m,L,isExp,nk,isCol,rc){
   const pub=fns.filter(f=>f.access==='public');const internalN=fns.length-pub.length;
   const tog=fns.length?`<button class="n-tog" data-tog aria-label="${isExp?'함수 요약 보기':'함수 전체 보기'}">${isExp?'함수 접기':'함수 전체'}</button>`:'';
   const head=`<div class="n-head"><span>${cat}</span><span class="n-hr">${relc}${tog}</span></div><div class="n-name">${esc(m.name)}</div>${m.desc?`<div class="n-desc">${esc(m.desc)}</div>`:''}`;
+  if(S.starOnly&&!isExp){const st=fns.filter(f=>f.star);
+    return `<div class="n-body">${head}<div class="n-count">${st.length?`<span><b>★ ${st.length}</b> 핵심</span><span>전체 ${fns.length}</span>`:'<span>핵심 함수 없음</span>'}</div>${st.length?`<ul class="n-fns">${st.map(f=>fnLi(m,f)).join('')}</ul>`:''}</div>${sub}`;}
   const cnt=`<div class="n-count">${c.method?`<span><b>${c.method}</b> 메서드</span>`:''}${c.event?`<span><b>${c.event}</b> 이벤트</span>`:''}${c.prop?`<span><b>${c.prop}</b> 프로퍼티</span>`:''}${!fns.length?'<span>함수 없음</span>':''}</div>`;
   if(L==='mid'&&!isExp){
     let pick=fns.filter(f=>f.star||usedOf(m.id,f.id)).sort((a,b)=>(b.star-a.star)||(usedOf(m.id,b.id)-usedOf(m.id,a.id)));
@@ -1001,7 +1020,7 @@ function nodeHTML(m,L,isExp,nk,isCol,rc){
 }
 function renderNodes(){
   buildTree();
-  const rel=S.sel?related(S.sel):null;const seen=new Set();const L=lod();
+  const rel=S.sel?related(S.sel):null;const seen=new Set();const L=viewLod();
   for(const m of S.managers.values()){
     seen.add(m.id);let el=nodeEls.get(m.id);
     if(!el){el=document.createElement('div');el.className='node';el.dataset.id=m.id;el.tabIndex=0;
@@ -1011,7 +1030,7 @@ function renderNodes(){
       world.appendChild(el);nodeEls.set(m.id,el);attachDrag(el);}
     const isExp=expanded.has(m.id),nk=(TREE.C.get(m.id)||[]).length,isCol=collapsed.has(m.id),rc=relCount(m.id);
     const u=m.functions.map(f=>usedOf(m.id,f.id)).join(',');
-    const sig=JSON.stringify([m.name,m.category,m.desc,m.functions,L,isExp,u,nk,isCol,rc]);
+    const sig=JSON.stringify([m.name,m.category,m.desc,m.functions,L,S.starOnly,isExp,u,nk,isCol,rc]);
     if(el._sig!==sig){el._sig=sig;el.innerHTML=nodeHTML(m,L,isExp,nk,isCol,rc);el.setAttribute('aria-label',m.name);}
     el.dataset.cat=CATL[m.category]?m.category:'system';
     el.classList.toggle('lod-far',L==='far'&&!isExp);
@@ -1641,7 +1660,7 @@ function renderList(){
     <h3>조직도 배치</h3>
     <p class="hint">카드는 상위·하위 관계에 따라 자동으로 정렬돼요. 카드를 다른 카드 위에 끌어다 놓으면 그 아래로 옮겨지고, 카드 아래의 <b>하위 N</b>을 누르면 가지를 접을 수 있어요. 호출·참조·이벤트 관계선은 기본으로 선택한 매니저 것만 보여요.</p>
     <h3>함수가 많을 때</h3>
-    <p class="hint">축소하면 이름만, 보통 배율에선 ★핵심 함수와 다른 매니저가 쓰는 함수만, 확대하면 Public 함수 전체가 그룹별로 보입니다. 카드의 <b>펼치기</b>로 하나만 자세히 볼 수도 있어요(내 화면에만 적용). 전체 목록 관리는 상단의 <b>함수 표</b>에서 하세요.</p>`;
+    <p class="hint">축소하면 이름만, 평소엔 ★핵심 함수와 다른 매니저가 쓰는 함수만 보여요. 도구막대의 <b>함수 전체</b>를 켜면 Public 함수 전체가 그룹별로, <b>★핵심만</b>을 켜면 ★ 함수만 보입니다. 카드의 <b>함수 전체</b> 버튼으로 하나만 자세히 볼 수도 있어요(내 화면에만 적용). 전체 목록 관리는 상단의 <b>함수 표</b>에서 하세요.</p>`;
   const qi=$('#q');qi.oninput=()=>{S.listQ=qi.value;const p=qi.selectionStart;renderList();const n=$('#q');n.focus();n.setSelectionRange(p,p);};
   panel.querySelectorAll('.mlist button').forEach(b=>b.onclick=()=>{select(b.dataset.id,b.dataset.fid||null);centerOn(b.dataset.id);});
 }
@@ -1896,6 +1915,7 @@ function renderTable(){
     if(S.tkind&&f.kind!==S.tkind)continue;
     if(S.tacc&&f.access!==S.tacc)continue;
     if(S.tunused&&(f.access!=='public'||used))continue;
+    if(S.starOnly&&!f.star)continue;
     if(q&&!(m.name+' '+f.sig+' '+f.desc+' '+f.group).toLowerCase().includes(q))continue;
     rows.push({m,f,used});
   }
