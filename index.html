@@ -633,25 +633,31 @@ function curDoc(c,id){const v=(c==='m'?S.rawM:S.links).get(id);if(!v)return null
 function note(c,id,after){if(!TX)return;const k=c+'/'+id;
   if(!TX.changes.has(k))TX.changes.set(k,{c,id,b:curDoc(c,id),a:null});
   TX.changes.get(k).a=after==null?null:plain(after);}
+// Every edit wrapped here calls note() before its first await, so the entry is sealed as soon as fn returns its
+// promise: a second edit started while the first is still waiting for the server can't leak into it.
+// A failed edit leaves no entry.
 async function withHistory(label,fn,opt){
   if(TX||!S.db)return fn();
   const tx=TX={label,g:S.game,bd:S.board,changes:new Map(),revert:!!(opt&&opt.revert)};
-  try{return await fn();}
-  finally{TX=null;saveHistory(tx);}
+  let p;try{p=fn();}finally{TX=null;}
+  const r=await p;saveHistory(tx);return r;
 }
 async function saveHistory(tx){
   const changes=[...tx.changes.values()].filter(ch=>!same(ch.b,ch.a));
   if(!changes.length||!S.db)return;
   const entry={at:Date.now(),by:S.me||'',byName:S.meName||'',label:tx.label,changes};
   if(tx.revert)entry.revert=true;
-  if(JSON.stringify(entry).length>HIST_BIG){delete entry.changes;entry.big=true;}
+  // Firestore's 1 MiB limit is in UTF-8 bytes (Hangul is 3 bytes a character), not string length
+  if(new TextEncoder().encode(JSON.stringify(entry)).length>HIST_BIG){delete entry.changes;entry.big=true;}
   try{
     const col=S.db.collection(cpathFor(tx.bd,'history',tx.g));
     await col.doc(uid('h')).set(plain(entry));
     if(tx.g===S.game&&tx.bd===S.board&&S.hist.length>=HIST_MAX){
       const old=await col.orderBy('at','desc').startAfter(S.hist[0].at).get();
       await runAll(old.docs.map(d=>()=>d.ref.delete()));}
-  }catch(e){console.error(e);if(e&&e.code==='permission-denied'){S.histErr=true;renderHist();}}
+  }catch(e){console.error(e);
+    if(e&&e.code==='permission-denied'){S.histErr=true;renderHist();}
+    else toast('편집 히스토리를 남기지 못했어요. 편집 내용은 저장됐어요');}
 }
 // for each doc touched after entry idx, the value it had right after idx (= before the first later edit)
 function restoreTargets(hist,idx){
@@ -665,13 +671,13 @@ async function restoreTo(idx){
   const ts=restoreTargets(S.hist,idx);
   if(!ts){toast('항목이 너무 많은 기록이 사이에 있어서 그 시점으로는 되돌릴 수 없어요');return;}
   const lab=idx<0?'시작 지점':`'${cut(S.hist[idx].label,30)}' 시점`;let n=0;
-  try{await withHistory(lab+'으로 되돌림',async()=>{
-      const tasks=[];
+  try{await withHistory(lab+'으로 되돌림',()=>{
+      const ops=[];
       for(const {c,id,v} of ts){if(same(curDoc(c,id),v))continue;n++;
         const r=(c==='m'?mref:lref)(id);
-        if(v==null){note(c,id,null);tasks.push(()=>r.delete());}
-        else{const body={...v,updatedAt:Date.now(),...by()};note(c,id,body);tasks.push(()=>r.set(plain(body)));}}
-      await runAll(tasks);},{revert:true});
+        if(v==null){note(c,id,null);ops.push({r,d:1});}
+        else{const body={...v,updatedAt:Date.now(),...by()};note(c,id,body);ops.push({r,s:plain(body)});}}
+      return commitAll(ops);},{revert:true});
     toast(n?`${lab}으로 되돌렸어요 · 항목 ${n}개`:'이미 그 시점과 같은 상태예요');
   }catch(e){fail(e);}
 }
@@ -762,20 +768,21 @@ async function moveManager(id,x,y){
   const m=S.managers.get(id);if(!m)return;
   // the first move on an auto-arranged page pins every card where it is now, so nothing else jumps
   const first=!freeMode();
-  try{await withHistory(first?`자유 배치 시작 (${m.name} 이동)`:`${m.name} 위치 이동`,async()=>{
-      const tasks=[];const pin=(k,px,py)=>{const patch={px:Math.round(px),py:Math.round(py)};note('m',k,{...curDoc('m',k),...patch});tasks.push(()=>mref(k).update(patch));};
+  try{await withHistory(first?`자유 배치 시작 (${m.name} 이동)`:`${m.name} 위치 이동`,()=>{
+      const ops=[];const pin=(k,px,py)=>{const patch={px:Math.round(px),py:Math.round(py)};note('m',k,{...curDoc('m',k),...patch});ops.push({r:mref(k),u:patch});};
       if(first)for(const [k,p] of pos)if(k!==id)pin(k,p.x,p.y);
-      pin(id,x,y);await runAll(tasks);});
+      pin(id,x,y);return commitAll(ops);});
     if(first)toast('자유 배치로 바꿨어요. 이제 카드를 원하는 곳에 둘 수 있어요');
   }catch(e){fail(e);scheduleEdges();}
 }
 async function delManager(id){
-  const up=TREE.P.get(id)||'';
-  for(const k of [...(TREE.C.get(id)||[])]){note('m',k,{...curDoc('m',k),parent:up});if(S.db)await mref(k).update({parent:up});else{const km=S.managers.get(k);if(km)S.managers.set(k,{...km,parent:up});}}
+  // children move up to this manager's parent; its relations go with it — all recorded, then one batch
+  const up=TREE.P.get(id)||'',kids=[...(TREE.C.get(id)||[])];
   const rel=[...S.links.values()].filter(l=>l.from===id||l.to===id);
-  rel.forEach(l=>note('l',l.id,null));note('m',id,null);
-  if(S.db){for(const l of rel) await lref(l.id).delete(); await mref(id).delete();}
-  else{rel.forEach(l=>S.links.delete(l.id));S.managers.delete(id);refresh();}
+  kids.forEach(k=>note('m',k,{...curDoc('m',k),parent:up}));rel.forEach(l=>note('l',l.id,null));note('m',id,null);
+  if(S.db)return commitAll([...kids.map(k=>({r:mref(k),u:{parent:up}})),...rel.map(l=>({r:lref(l.id),d:1})),{r:mref(id),d:1}]);
+  for(const k of kids){const km=S.managers.get(k);if(km)S.managers.set(k,{...km,parent:up});}
+  rel.forEach(l=>S.links.delete(l.id));S.managers.delete(id);refresh();
 }
 async function putLink(id,data){
   const body={from:data.from,to:data.to,kind:data.kind,toFn:data.toFn||'',note:data.note||'',updatedAt:Date.now(),...by()};
@@ -1016,12 +1023,13 @@ function dragAim(cx,cy,shift){
   let t=null,hit=null;
   if(shift){const els=document.elementsFromPoint(cx,cy);
     hit=els.map(x=>x.closest&&x.closest('.node')).find(n=>n&&n!==d.el);
-    t=hit&&!d.bad.has(hit.dataset.id)?hit.dataset.id:null;
-    if(!t&&TREE.P.has(d.id)&&(FREE||(laneEl&&!laneEl.hidden&&els.includes(laneEl))))t='__root';}
-  if(t!==d.target){clearDrop();d.target=t;if(t==='__root'){if(!FREE)laneEl.classList.add('drop');}else if(t)hit.classList.add('drop');}
+    // over its own sub-card: refuse rather than fall through to "make independent"
+    if(hit)t=d.bad.has(hit.dataset.id)?'__bad':hit.dataset.id;
+    else if(TREE.P.has(d.id)&&(FREE||(laneEl&&!laneEl.hidden&&els.includes(laneEl))))t='__root';}
+  if(t!==d.target){clearDrop();d.target=t;if(t==='__root'){if(!FREE)laneEl.classList.add('drop');}else if(t&&t!=='__bad')hit.classList.add('drop');}
   if(!dragTip){dragTip=document.createElement('div');dragTip.className='dragtip';document.body.appendChild(dragTip);}
   dragTip.hidden=false;dragTip.style.left=(cx+14)+'px';dragTip.style.top=(cy+18)+'px';
-  dragTip.textContent=t==='__root'?'놓으면 독립 매니저로 빼기':t?`놓으면 ‘${(S.managers.get(t)||{}).name}’ 하위로 넣기`
+  dragTip.textContent=t==='__bad'?'자기 자신의 하위 카드에는 넣을 수 없어요':t==='__root'?'놓으면 독립 매니저로 빼기':t?`놓으면 ‘${(S.managers.get(t)||{}).name}’ 하위로 넣기`
     :shift?'놓으면 이 자리로 이동':'놓으면 이 자리로 이동 · Shift: 하위로 넣기';
 }
 document.addEventListener('keydown',e=>{if(e.key==='Shift'&&drag&&drag.moved&&!drag.shift)dragAim(drag.cx,drag.cy,true);});
@@ -1048,7 +1056,9 @@ function attachDrag(el){
     if(drag.moved&&e.type==='pointerup'&&e.shiftKey!==drag.shift)dragAim(e.clientX,e.clientY,e.shiftKey);
     const d=drag;drag=null;el.classList.remove('dragging');clearDrop();if(dragTip)dragTip.hidden=true;
     if(!d.moved){select(d.id);return;}
-    if(e.type==='pointercancel'){scheduleEdges();return;}
+    if(e.type==='pointercancel'||d.target==='__bad'){scheduleEdges();return;}
+    // on an auto-arranged page the first move pins every card for the whole team, so ignore a small nudge
+    if(!d.target&&!FREE&&Math.hypot(e.clientX-d.sx,e.clientY-d.sy)<30){scheduleEdges();return;}
     if(d.target){const next=d.target==='__root'?'':d.target;
       // free layout: a new child goes under its parent, a card pulled out stays where it was dropped
       if(next!==(TREE.P.get(d.id)||''))setParent(d.id,next,!FREE?null:next?slotUnder(next,d.id):{x:d.nx,y:d.ny});}
@@ -1232,11 +1242,11 @@ async function tidyUp(){
   // hidden (collapsed) cards get the height they would have, so they land correctly when expanded
   const H=id=>{const el=nodeEls.get(id);return el&&!el.hidden&&el.offsetHeight?el.offsetHeight:cardSpec(S.managers.get(id),viewLod()==='near'?'full':'summary').h;};
   const R=tidyLayout(H);
-  try{await withHistory('자동 정리',async()=>{const tasks=[];
+  try{await withHistory('자동 정리',()=>{const ops=[];
       for(const [id,p] of R.pos){const m=S.managers.get(id);const patch={px:Math.round(p.x),py:Math.round(p.y)};
         if(!m||(m.px===patch.px&&m.py===patch.py))continue;
-        note('m',id,{...curDoc('m',id),...patch});tasks.push(()=>mref(id).update(patch));}
-      await runAll(tasks);});
+        note('m',id,{...curDoc('m',id),...patch});ops.push({r:mref(id),u:patch});}
+      return commitAll(ops);});
     toast('관계선이 덜 꼬이도록 다시 배치했어요');setTimeout(fit,80);
   }catch(e){fail(e);}
 }
@@ -1396,6 +1406,11 @@ function lref(id){return S.db.doc(cpath('links')+'/'+id);}
 function boardName(b){return(b&&b.name)||(b&&b.id==='main'?'기본 페이지':'이름 없는 페이지');}
 function curBoard(){return S.boards.find(b=>b.id===S.board)||{id:S.board};}
 const plain=o=>JSON.parse(JSON.stringify(o));
+// One atomic batch per 450 writes: listeners see the whole change at once (no half-pinned layout flashing),
+// and the doc refs are fixed when the ops are built, so a page switch mid-write can't redirect them.
+// ops: {r:docRef, s:data} set · {r, u:patch} update · {r, d:1} delete
+async function commitAll(ops){for(let i=0;i<ops.length;i+=450){const b=S.db.batch();
+  for(const o of ops.slice(i,i+450)){if(o.d)b.delete(o.r);else if(o.u)b.update(o.r,o.u);else b.set(o.r,o.s);}await b.commit();}}
 async function runAll(tasks,n=8){let i=0;const w=async()=>{while(i<tasks.length){const t=tasks[i++];await t();}};await Promise.all(Array.from({length:Math.min(n,tasks.length)},w));}
 
 function startGames(){
@@ -1653,7 +1668,7 @@ async function importJSON(data){
       tasks.push(()=>S.db.doc(cpathFor(bid,'links',g)+'/'+id).set(body));}};
   if(Array.isArray(data.pages)){
     for(const p of data.pages){if(!okId.test(p.id||''))continue;
-      if(!S.boards.some(b=>b.id===p.id)||p.name)await bdoc(p.id,g).set({name:p.name||'',order:p.id==='main'?0:Date.now(),createdAt:Date.now()});
+      if(!S.boards.some(b=>b.id===p.id)||p.name){const meta={name:p.name||'',order:p.id==='main'?0:Date.now(),createdAt:Date.now()};tasks.push(()=>bdoc(p.id,g).set(meta));}
       put(p.id,p.managers,p.links);}
   }else if(Array.isArray(data.managers)||Array.isArray(data.links))put(S.board,data.managers,data.links);
   else throw new Error('format');
@@ -1697,6 +1712,13 @@ function cardSpec(m,mode){
   }
   return{L,h:20+L.reduce((s,x)=>s+LH[x.t],0)};
 }
+// free-layout positions come from the screen, but exported cards can be taller ("전체 함수"):
+// push any card that would overlap one above it further down
+function unoverlap(P){const done=[];
+  for(const p of [...P.values()].sort((a,b)=>a.y-b.y||a.x-b.x)){
+    for(let moved=true;moved;){moved=false;
+      for(const q of done)if(p.x<q.x+NW+8&&q.x<p.x+NW+8&&p.y<q.y+q.h+12&&q.y<p.y+p.h+12){p.y=q.y+q.h+12;moved=true;}}
+    done.push(p);}}
 // y of a function row inside a drawn card, matching drawCard's line stepping
 function specRowY(spec,fid){let y=10;for(const ln of spec.L){if(ln.t==='fn'&&ln.f.id===fid)return y+LH.fn/2;y+=LH[ln.t];}return null;}
 function rrect(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
@@ -1729,6 +1751,7 @@ function renderExport(scale,maxW){
   const specs=new Map();for(const m of S.managers.values())specs.set(m.id,cardSpec(m,X.content));
   const free=freeMode(),HX=id=>specs.get(id).h;
   const R=free?computeFreeLayout(HX,{kids}):computeLayout(HX,{kids,laneH:22,forceLane:false,stackMin:Infinity});const P=R.pos;
+  if(free)unoverlap(P);
   if(!P.size)return null;
   let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const p of P.values()){a=Math.min(a,p.x);b=Math.min(b,p.y);c=Math.max(c,p.x+NW);d=Math.max(d,p.y+p.h);}
   if(R.lane.show){b=Math.min(b,R.lane.top);c=Math.max(c,R.lane.width);}
@@ -2066,9 +2089,9 @@ async function doSave(){
   const keep=new Set(d.functions.filter(f=>f.sig||f.desc).map(f=>f.id));
   const orphan=[...S.links.values()].filter(l=>l.to===d.id&&l.toFn&&!keep.has(l.toFn));
   S.saving=true;S.dirty=false;S.stale=false;
-  try{await withHistory(describeSave(cur,d),async()=>{
-      await putManager(d.id,{...d,name:d.name.trim(),x:cur?cur.x:d.x,y:cur?cur.y:d.y});
-      for(const l of orphan)await patchLink(l.id,{toFn:''});});
+  try{await withHistory(describeSave(cur,d),()=>Promise.all([
+      putManager(d.id,{...d,name:d.name.trim(),x:cur?cur.x:d.x,y:cur?cur.y:d.y}),
+      ...orphan.map(l=>patchLink(l.id,{toFn:''}))]));
     toast(orphan.length?`저장했어요. 삭제된 함수를 쓰던 관계 ${orphan.length}개는 매니저 단위로 바뀌었어요`:'저장했어요');}
   catch(e){S.dirty=true;fail(e);}
   S.saving=false;const m=S.managers.get(d.id);if(m&&!S.dirty){S.draft=clone(m);lastSelSig=contentSig(m);}renderPanel();
@@ -2184,22 +2207,26 @@ $('#addBtn').onclick=()=>addManager('');$('#emptyAdd').onclick=()=>addManager(''
 
 /* ---------- Space palette: find a manager anywhere and place it on this page ---------- */
 // index of managers on every other page (all games), read on demand and kept for a minute
-let XI={at:0,items:[]},xiLoad=null;
+let XI={at:0,key:'',items:[]},xiLoad=null,xiKey='';
 function crossIndex(){
-  if(Date.now()-XI.at<60000)return Promise.resolve(XI.items);
-  if(xiLoad)return xiLoad;
-  xiLoad=(async()=>{const items=[];
-    const games=[...S.games].sort((a,b)=>(b.id===S.game)-(a.id===S.game));
+  // the index leaves out the page it was built from, so it is only reused on that same page
+  const key=S.game+'|'+S.board;
+  if(XI.key===key&&Date.now()-XI.at<60000)return Promise.resolve(XI.items);
+  if(xiLoad&&xiKey===key)return xiLoad;
+  xiKey=key;
+  const g0=S.game,b0=S.board,boards0=S.boards.length?S.boards:[{id:'main'}]; // fixed here: the user may switch pages while this loads
+  const load=xiLoad=(async()=>{const items=[];
+    const games=[...S.games].sort((a,b)=>(b.id===g0)-(a.id===g0));
     for(const g of games){let boards=[];
-      if(g.id===S.game)boards=S.boards.length?S.boards:[{id:'main'}];
+      if(g.id===g0)boards=boards0;
       else{try{boards=(await S.db.collection(boardsPath(g.id)).get()).docs.map(d=>({id:d.id,...d.data()}));}catch(e){}
         if(!boards.some(b=>b.id==='main'))boards.push({id:'main'});}
-      await Promise.all(boards.filter(bd=>!(g.id===S.game&&bd.id===S.board)).map(async bd=>{
+      await Promise.all(boards.filter(bd=>!(g.id===g0&&bd.id===b0)).map(async bd=>{
         try{(await S.db.collection(cpathFor(bd.id,'managers',g.id)).get()).docs.forEach(d=>{const v=d.data();if(v.ref)return;
           items.push({g:g.id,b:bd.id,id:d.id,name:v.name||'',category:v.category||'system',fns:(v.functions||[]).length,
-            where:`${gameName(g)} · ${boardName(bd)}`,same:g.id===S.game});});}catch(e){}}));}
-    XI={at:Date.now(),items};return items;})();
-  return xiLoad.finally(()=>{xiLoad=null;});
+            where:`${gameName(g)} · ${boardName(bd)}`,same:g.id===g0});});}catch(e){}}));}
+    XI={at:Date.now(),key,items};return items;})();
+  return load.finally(()=>{if(xiLoad===load)xiLoad=null;});
 }
 const pal={at:null,sel:0,items:[]};let lastWorld=null;
 vp.addEventListener('pointermove',e=>{const r=vp.getBoundingClientRect();lastWorld={cx:e.clientX,cy:e.clientY,x:(e.clientX-r.left-T.x)/T.k,y:(e.clientY-r.top-T.y)/T.k};});
@@ -2210,7 +2237,7 @@ function palResults(raw){
   const here=[...S.managers.values()].filter(m=>score(m.name)).sort((a,b)=>score(b.name)-score(a.name)||a.name.localeCompare(b.name)).slice(0,8)
     .map(m=>({type:'here',id:m.id,name:m.name,sub:m.ref?`이 페이지 · ↗ ${m.refFrom||'참조'}`:'이 페이지'}));
   const placed=new Set([...S.rawM.values()].filter(d=>d.ref).map(d=>refKey(d.ref)));
-  const other=XI.items.filter(it=>score(it.name)&&!placed.has(refKey(it)))
+  const other=(XI.key===S.game+'|'+S.board?XI.items:[]).filter(it=>score(it.name)&&!placed.has(refKey(it))&&!(it.g===S.game&&it.b===S.board))
     .sort((a,b)=>score(b.name)-score(a.name)||(b.same-a.same)||a.name.localeCompare(b.name)).slice(0,30)
     .map(it=>({type:'ref',it,name:it.name,sub:`${it.where} · 함수 ${it.fns}개`}));
   const out=[];
@@ -2250,6 +2277,7 @@ async function palPick(k){
 }
 async function placeRef(it,at){
   if(S.dirty&&!confirmLeave())return;
+  S.dirty=false; // the unsaved draft was just discarded; selecting the new card must not ask again
   const id=uid('m'),free=freeMode(),p=free?(at||viewCenter()):null;
   const body={ref:{g:it.g,b:it.b,id:it.id},refFrom:it.where,name:it.name,category:it.category,desc:'',functions:[],parent:'',x:0,y:0,
     ...(p?{px:Math.round(p.x),py:Math.round(p.y)}:{}),updatedAt:Date.now(),...by()};
@@ -2269,10 +2297,11 @@ document.addEventListener('pointerdown',e=>{if(!$('#pal').hidden&&!e.target.clos
 // Space opens the palette at the cursor, unless the user is typing or a dialog is open
 document.addEventListener('keydown',e=>{
   if(e.key!==' '||e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;
-  const t=e.target;if(t.closest&&t.closest('input,textarea,select,[contenteditable="true"]'))return;
-  if(t.closest&&t.closest('button')&&!t.closest('#vp'))return; // keep Space for buttons outside the canvas
-  if(S.view!=='map'||!S.db||!S.canWrite||!$('#pal').hidden||!$('#xModal').hidden||!$('#teamModal').hidden)return;
+  const t=e.target;if(t.closest&&t.closest('input,textarea,select,button,[contenteditable="true"]'))return; // Space still presses a focused button
+  if(S.view!=='map'||!S.db||!S.canWrite||!$('#gate').hidden||!$('#pal').hidden||!$('#xModal').hidden||!$('#teamModal').hidden)return;
   e.preventDefault();openPalette(lastWorld);});
+// a mouse click shouldn't leave focus on canvas buttons, or the next Space would press them again
+vp.addEventListener('click',e=>{if(e.detail>0){const btn=e.target.closest('button');if(btn)btn.blur();}},true);
 
 $('#loadSample').onclick=async()=>{
   if(!S.canWrite){toast('보기 전용이라 불러올 수 없어요');return;}
@@ -2307,14 +2336,15 @@ $('#loadSample').onclick=async()=>{
       ['OnSaveCompleted : Action<int>','저장 완료 이벤트','event','public','',false]],40,40]];
   const ids={},fids={};
   try{
-    await withHistory('예시 구조 불러오기',async()=>{
+    await withHistory('예시 구조 불러오기',()=>{const w=[];
       for(const [name,category,desc,fns,x,y] of ms){const id=uid('m');ids[name]=id;
         const functions=fns.map(([sig,d,kind,access,group,star])=>{const fid=uid('f');fids[name+'.'+shortName(sig)]=fid;return{id:fid,sig,desc:d,kind,access,group,star};});
-        await putManager(id,{name:uniqueName(name),category,desc,functions,x,y,parent:name==='GameManager'?'':ids.GameManager});}
+        w.push(putManager(id,{name:uniqueName(name),category,desc,functions,x,y,parent:name==='GameManager'?'':ids.GameManager}));}
       const ls=[['GameManager','SaveManager','call','Save'],['GameManager','SaveManager','call','Load'],
         ['GameManager','AudioManager','call','PlayBgm'],['UIManager','InputManager','event','OnActionPressed'],
         ['UIManager','GameManager','event','OnStateChanged'],['UIManager','SaveManager','event','OnSaveCompleted']];
-      for(const [a,b,kind,fn] of ls)await putLink(uid('l'),{from:ids[a],to:ids[b],kind,toFn:fn?fids[b+'.'+fn]:''});});
+      for(const [a,b,kind,fn] of ls)w.push(putLink(uid('l'),{from:ids[a],to:ids[b],kind,toFn:fn?fids[b+'.'+fn]:''}));
+      return Promise.all(w);});
     toast('예시 구조를 불러왔어요. 필요 없는 매니저는 삭제하세요');
     setTimeout(fit,100);
   }catch(e){fail(e);}
