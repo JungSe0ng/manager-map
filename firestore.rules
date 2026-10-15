@@ -47,22 +47,27 @@ service cloud.firestore {
       allow read, write: if isEditor();
     }
 
-    // 추가 페이지: boards/{페이지}/managers, boards/{페이지}/links
+    // 편집 히스토리 (첫 게임의 기본 페이지)
+    match /history/{entryId} {
+      allow read, write: if isEditor();
+    }
+
+    // 추가 페이지: boards/{페이지}/managers, links, history
     match /boards/{boardId} {
       allow read, write: if isEditor();
       match /{sub}/{docId} {
-        allow read, write: if isEditor() && sub in ['managers', 'links'];
+        allow read, write: if isEditor() && sub in ['managers', 'links', 'history'];
       }
     }
 
-    // 추가 게임: games/{게임}/boards/{페이지}/managers, .../links
-    // (처음 게임은 위의 meta/project, managers, links, boards 경로를 그대로 씁니다)
+    // 추가 게임: games/{게임}/boards/{페이지}/managers, links, history
+    // (처음 게임은 위의 meta/project, managers, links, history, boards 경로를 그대로 씁니다)
     match /games/{gameId} {
       allow read, write: if isEditor();
       match /boards/{boardId} {
         allow read, write: if isEditor();
         match /{sub}/{docId} {
-          allow read, write: if isEditor() && sub in ['managers', 'links'];
+          allow read, write: if isEditor() && sub in ['managers', 'links', 'history'];
         }
       }
     }

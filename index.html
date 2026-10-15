@@ -302,6 +302,26 @@ textarea.inp{resize:vertical;min-height:58px;line-height:1.5}
 .gitem .ck{width:14px;flex:none;color:var(--sel);font-weight:700}
 .gitem span:last-child{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .gitem[aria-current="true"]{font-weight:600}
+/* edit history: pinned under the panel in the right column */
+.side{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--panel);border-left:1px solid var(--line)}
+.side>.panel{flex:1;min-height:0;border-left:0}
+.hist{flex:none;display:flex;flex-direction:column;max-height:42%;min-height:0;border-top:1px solid var(--line);background:var(--panel)}
+.hhead{display:flex;align-items:center;gap:6px;padding-block:8px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(12px,env(safe-area-inset-right,0px))}
+.hhead h3{margin:0;flex:1;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);font-weight:600;display:flex;gap:6px;align-items:baseline}
+.hhead h3 span{letter-spacing:0;font-weight:500;font-variant-numeric:tabular-nums}
+.hlist{list-style:none;margin:0;padding:0 0 6px;overflow-y:auto;min-height:0;border-top:1px solid var(--line)}
+.hrow{display:grid;grid-template-columns:auto minmax(0,1fr);column-gap:8px;row-gap:1px;width:100%;border:0;border-left:3px solid transparent;background:transparent;text-align:left;padding:6px 16px 6px 13px;font-size:12.5px;color:var(--ink)}
+.hrow:hover{background:var(--soft)}
+.hrow .hn{font-family:var(--f-mono);font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;padding-top:1px}
+.hrow .hl{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hrow small{grid-column:2;font-size:11px;color:var(--muted)}
+.hrow.cur{background:color-mix(in srgb,var(--c-gameplay) 16%,transparent);border-left-color:var(--c-gameplay);font-weight:600}
+.hrow.open{background:var(--soft)}
+.hdet{padding:2px 16px 10px 37px;font-size:12px;color:var(--muted);display:flex;flex-direction:column;gap:8px;background:var(--soft)}
+.hdet ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
+.hdet b{color:var(--ink);font-weight:500;font-family:var(--f-mono)}
+.hnote{margin:0;padding:4px 16px 12px;font-size:12px;color:var(--muted);line-height:1.5}
+.hist.closed .hlist,.hist.closed .hnote{display:none}
 .xmodal{position:fixed;inset:0;z-index:80;background:rgba(10,16,26,.5);display:flex;align-items:center;justify-content:center;padding:16px}
 .xbox{background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow);width:100%;max-width:980px;max-height:calc(100% - 8px);overflow:auto;padding:18px 20px 20px}
 .xhead{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
@@ -330,6 +350,10 @@ label.btn{display:inline-flex;align-items:center;cursor:pointer}
   .main{grid-template-columns:minmax(0,1fr)}
   .stage{height:64vh;min-height:380px}
   .panel{border-left:0;border-top:1px solid var(--line);overflow:visible}
+  .side{border-left:0;border-top:1px solid var(--line)}
+  .side>.panel{border-top:0}
+  .hist{max-height:none}
+  .hlist{max-height:320px}
   .actions{bottom:0}
   .legend{gap:8px}
   .legend .opt{display:none}
@@ -473,7 +497,10 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
       </div>
     </div>
   </div>
-  <aside class="panel" id="panel" aria-live="polite"></aside>
+  <div class="side">
+    <aside class="panel" id="panel" aria-live="polite"></aside>
+    <section class="hist" id="hist" aria-label="편집 히스토리" hidden></section>
+  </div>
 </div>
 <datalist id="grpList"></datalist>
 
@@ -557,11 +584,136 @@ function fail(e){console.error(e);
   toast('저장하지 못했어요. 잠시 후 다시 시도하세요.');}
 const by=()=>({updatedBy:S.me||null,updatedByName:S.meName||''});
 
+/* ---------- edit history (shared per page) ---------- */
+// Each edit is saved next to the page's managers/links as {label, changes:[{c:'m'|'l', id, b:before, a:after}]}.
+// Restoring writes older values back and is itself recorded, so a restore can be restored too.
+const HIST_MAX=100,HIST_BIG=900000,STAMPS=new Set(['updatedAt','updatedBy','updatedByName']);
+S.hist=[];S.histErr=false;S.histSel=null;let TX=null;
+// key-order independent comparison that ignores who/when stamps
+function stable(v){if(Array.isArray(v))return'['+v.map(stable).join(',')+']';
+  if(v&&typeof v==='object')return'{'+Object.keys(v).filter(k=>!STAMPS.has(k)&&v[k]!==undefined).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}';
+  return JSON.stringify(v??null);}
+function same(x,y){return(x==null&&y==null)||(x!=null&&y!=null&&stable(x)===stable(y));}
+function curDoc(c,id){const v=(c==='m'?S.managers:S.links).get(id);if(!v)return null;const {id:_,...rest}=v;return plain(rest);}
+// call right before each write; the first call per doc captures its value before the edit
+function note(c,id,after){if(!TX)return;const k=c+'/'+id;
+  if(!TX.changes.has(k))TX.changes.set(k,{c,id,b:curDoc(c,id),a:null});
+  TX.changes.get(k).a=after==null?null:plain(after);}
+async function withHistory(label,fn,opt){
+  if(TX||!S.db)return fn();
+  const tx=TX={label,g:S.game,bd:S.board,changes:new Map(),revert:!!(opt&&opt.revert)};
+  try{return await fn();}
+  finally{TX=null;saveHistory(tx);}
+}
+async function saveHistory(tx){
+  const changes=[...tx.changes.values()].filter(ch=>!same(ch.b,ch.a));
+  if(!changes.length||!S.db)return;
+  const entry={at:Date.now(),by:S.me||'',byName:S.meName||'',label:tx.label,changes};
+  if(tx.revert)entry.revert=true;
+  if(JSON.stringify(entry).length>HIST_BIG){delete entry.changes;entry.big=true;}
+  try{
+    const col=S.db.collection(cpathFor(tx.bd,'history',tx.g));
+    await col.doc(uid('h')).set(plain(entry));
+    if(tx.g===S.game&&tx.bd===S.board&&S.hist.length>=HIST_MAX){
+      const old=await col.orderBy('at','desc').startAfter(S.hist[0].at).get();
+      await runAll(old.docs.map(d=>()=>d.ref.delete()));}
+  }catch(e){console.error(e);if(e&&e.code==='permission-denied'){S.histErr=true;renderHist();}}
+}
+// for each doc touched after entry idx, the value it had right after idx (= before the first later edit)
+function restoreTargets(hist,idx){
+  const later=hist.slice(idx+1);
+  if(later.some(h=>!Array.isArray(h.changes)))return null;
+  const t=new Map();
+  for(const h of later)for(const ch of h.changes){const k=ch.c+'/'+ch.id;if(!t.has(k))t.set(k,{c:ch.c,id:ch.id,v:ch.b??null});}
+  return[...t.values()];
+}
+async function restoreTo(idx){
+  const ts=restoreTargets(S.hist,idx);
+  if(!ts){toast('항목이 너무 많은 기록이 사이에 있어서 그 시점으로는 되돌릴 수 없어요');return;}
+  const lab=idx<0?'시작 지점':`'${cut(S.hist[idx].label,30)}' 시점`;let n=0;
+  try{await withHistory(lab+'으로 되돌림',async()=>{
+      const tasks=[];
+      for(const {c,id,v} of ts){if(same(curDoc(c,id),v))continue;n++;
+        const r=(c==='m'?mref:lref)(id);
+        if(v==null){note(c,id,null);tasks.push(()=>r.delete());}
+        else{const body={...v,updatedAt:Date.now(),...by()};note(c,id,body);tasks.push(()=>r.set(plain(body)));}}
+      await runAll(tasks);},{revert:true});
+    toast(n?`${lab}으로 되돌렸어요 · 항목 ${n}개`:'이미 그 시점과 같은 상태예요');
+  }catch(e){fail(e);}
+}
+const cut=(s,n)=>{s=String(s||'');return s.length>n?s.slice(0,n-1)+'…':s;};
+const kindLabel=k=>(KINDS[k]||KINDS.call).label;
+function linkLabel(l){return`${mname(l.from)} → ${mname(l.to)} (${kindLabel(l.kind)})`;}
+function describeSave(m,d){
+  const name=d.name.trim();if(!m)return`${name} 수정`;
+  const parts=[];
+  if((m.name||'')!==name)parts.push('이름');
+  if((m.category||'system')!==d.category)parts.push('분류');
+  if((m.desc||'')!==(d.desc||''))parts.push('설명');
+  if(effParent(m)!==(d.parent||''))parts.push('상위');
+  const A=new Map(m.functions.map(f=>[f.id,f])),B=new Map(d.functions.filter(f=>f.sig||f.desc).map(f=>[f.id,f]));
+  let add=0,del=0,mod=0;
+  for(const [id,f] of B){const o=A.get(id);if(!o)add++;else if(!same(o,f))mod++;}
+  for(const id of A.keys())if(!B.has(id))del++;
+  const fp=[add&&'+'+add,del&&'−'+del,mod&&'수정 '+mod].filter(Boolean);
+  if(fp.length)parts.push('함수 '+fp.join(' '));
+  else if(stable(m.functions.map(f=>f.id))!==stable([...B.keys()]))parts.push('함수 순서');
+  return`${name} 수정${parts.length?' ('+parts.join(', ')+')':''}`;
+}
+
+let histOpen=true;try{histOpen=localStorage.getItem('mm.histOpen')!=='0';}catch(e){}
+function renderHist(){
+  const el=$('#hist');if(!el)return;
+  if(!S.db){el.hidden=true;return;}
+  el.hidden=false;el.classList.toggle('closed',!histOpen);
+  const H=S.hist,last=H.length-1,can=S.canWrite;
+  const old=$('#hList'),wasBottom=!old||old.scrollHeight-old.scrollTop-old.clientHeight<24,top=old?old.scrollTop:0;
+  const mgrName=(id,h)=>{const m=S.managers.get(id);if(m)return m.name;
+    const ch=(h.changes||[]).find(x=>x.c==='m'&&x.id===id);return ch?(ch.a||ch.b).name:'(삭제됨)';};
+  const op=ch=>!ch.b?'추가':!ch.a?'삭제':'수정';
+  const chLine=h=>ch=>{const d=ch.a||ch.b||{};
+    return ch.c==='m'?`<li>매니저 <b>${esc(d.name||'?')}</b> ${op(ch)}</li>`
+      :`<li>관계 <b>${esc(mgrName(d.from,h))}</b> → <b>${esc(mgrName(d.to,h))}</b> ${esc(kindLabel(d.kind))} ${op(ch)}</li>`;};
+  const detail=(i,h)=>{
+    let body='';
+    if(i<0)body='<span>목록에 있는 모든 편집이 일어나기 전 상태예요.</span>';
+    else if(h.big)body='<span>항목이 너무 많아서 상세 내용 없이 저장된 기록이에요.</span>';
+    else{const items=(h.changes||[]).map(chLine(h));body=`<ul>${items.slice(0,10).join('')}${items.length>10?`<li>외 ${items.length-10}개</li>`:''}</ul>`;}
+    const tail=i===last?'<span>지금 상태예요.</span>':can?'<div><button class="btn small" id="hRestore">이 시점으로 되돌리기</button></div>':'';
+    return`<div class="hdet">${body}${tail}</div>`;};
+  const row=(i,h)=>{const key=i<0?'start':h.id,open=S.histSel===key;
+    const label=i<0?'시작 지점':(h.revert?'↺ ':'')+h.label;
+    const meta=i<0?'기록 이전':`${esc(h.byName||h.by||'')} · ${ago(h.at)}`;
+    return`<li><button class="hrow${i===last?' cur':''}${open?' open':''}" data-hk="${esc(key)}" aria-expanded="${open}" title="${esc(label)}"><span class="hn">#${i+1}</span><span class="hl">${esc(label)}</span><small>${meta}</small></button>${open?detail(i,h):''}</li>`;};
+  el.innerHTML=`<div class="hhead"><h3>편집 히스토리 <span>${H.length}</span></h3>`
+    +(can&&H.length&&!S.histErr?'<button class="btn small" id="hClear">히스토리 초기화</button>':'')
+    +`<button class="icon-btn" id="hToggle" aria-expanded="${histOpen}" aria-label="${histOpen?'히스토리 접기':'히스토리 펼치기'}" title="${histOpen?'접기':'펼치기'}">${histOpen?'▼':'▲'}</button></div>`
+    +(S.histErr?'<p class="hnote">Firestore 규칙에 history 부분이 없어서 기록을 읽지 못했어요. README의 규칙 업데이트를 따라 다시 게시하세요. 편집 내용은 그대로 저장돼요.</p>'
+      :!H.length?'<p class="hnote">아직 기록이 없어요. 매니저나 관계를 편집하면 여기에 쌓여요.</p>'
+      :`<ul class="hlist" id="hList">${row(-1,null)}${H.map((h,i)=>row(i,h)).join('')}</ul>`);
+  const L=$('#hList');if(L)L.scrollTop=wasBottom?L.scrollHeight:top;
+  $('#hToggle').onclick=()=>{histOpen=!histOpen;try{localStorage.setItem('mm.histOpen',histOpen?'1':'0');}catch(e){}renderHist();};
+  el.querySelectorAll('[data-hk]').forEach(b=>b.onclick=()=>{S.histSel=S.histSel===b.dataset.hk?null:b.dataset.hk;renderHist();});
+  const rb=$('#hRestore');if(rb)rb.onclick=()=>{
+    if(!rb.classList.contains('armed')){rb.classList.add('danger','armed');rb.textContent='한 번 더 누르면 되돌려요';return;}
+    const idx=S.histSel==='start'?-1:S.hist.findIndex(h=>h.id===S.histSel);
+    if(idx<-1||(idx<0&&S.histSel!=='start'))return;
+    S.histSel=null;renderHist();restoreTo(idx);};
+  const cb=$('#hClear');if(cb)cb.onclick=async()=>{
+    if(!cb.classList.contains('armed')){cb.classList.add('danger','armed');cb.textContent='한 번 더 누르면 기록 삭제';return;}
+    const g=S.game,bd=S.board;
+    try{const s=await S.db.collection(cpathFor(bd,'history',g)).get();await runAll(s.docs.map(d=>()=>d.ref.delete()));
+      S.histSel=null;toast('이 페이지의 편집 히스토리를 지웠어요');}catch(e){fail(e);}};
+}
+// keep "N분 전" fresh without disturbing an armed button
+setInterval(()=>{if(S.hist.length&&!document.hidden&&!document.querySelector('#hist .armed'))renderHist();},60000);
+
 /* ---------- store ---------- */
 async function putManager(id,data){
   const body={name:data.name||'Unnamed',category:data.category||'system',desc:data.desc||'',
     functions:(data.functions||[]).filter(f=>f.sig||f.desc).map(f=>({id:f.id||uid('f'),sig:f.sig||'',desc:f.desc||'',kind:f.kind||'method',access:f.access||'public',group:f.group||'',star:!!f.star})),
     parent:data.parent||'',x:Math.round(data.x||0),y:Math.round(data.y||0),updatedAt:Date.now(),...by()};
+  note('m',id,body);
   if(S.db) await mref(id).set(body);
   else{S.managers.set(id,normM(id,body));refresh();}
 }
@@ -572,21 +724,25 @@ async function moveManager(id,x,y){
 }
 async function delManager(id){
   const up=TREE.P.get(id)||'';
-  for(const k of [...(TREE.C.get(id)||[])]){if(S.db)await mref(k).update({parent:up});else{const km=S.managers.get(k);if(km)S.managers.set(k,{...km,parent:up});}}
+  for(const k of [...(TREE.C.get(id)||[])]){note('m',k,{...curDoc('m',k),parent:up});if(S.db)await mref(k).update({parent:up});else{const km=S.managers.get(k);if(km)S.managers.set(k,{...km,parent:up});}}
   const rel=[...S.links.values()].filter(l=>l.from===id||l.to===id);
+  rel.forEach(l=>note('l',l.id,null));note('m',id,null);
   if(S.db){for(const l of rel) await lref(l.id).delete(); await mref(id).delete();}
   else{rel.forEach(l=>S.links.delete(l.id));S.managers.delete(id);refresh();}
 }
 async function putLink(id,data){
   const body={from:data.from,to:data.to,kind:data.kind,toFn:data.toFn||'',note:data.note||'',updatedAt:Date.now(),...by()};
+  note('l',id,body);
   if(S.db) await lref(id).set(body);
   else{S.links.set(id,{id,...body});refresh();}
 }
 async function patchLink(id,patch){
+  note('l',id,{...curDoc('l',id),...patch});
   if(S.db) await lref(id).update(patch);
   else{const l=S.links.get(id);if(l){S.links.set(id,{...l,...patch});refresh();}}
 }
 async function delLink(id){
+  note('l',id,null);
   if(S.db) await lref(id).delete();
   else{S.links.delete(id);refresh();}
 }
@@ -714,8 +870,10 @@ async function setParent(id,p){
   const m=S.managers.get(id);if(!m)return;
   if(p&&(p===id||descendants(id).has(p))){toast('자기 하위 매니저 아래로는 옮길 수 없어요');scheduleEdges();return;}
   try{
-    if(S.db)await mref(id).update({parent:p||'',updatedAt:Date.now()});
-    else{S.managers.set(id,{...m,parent:p||''});refresh();}
+    await withHistory(p?`${m.name} → ${(S.managers.get(p)||{}).name} 하위로 이동`:`${m.name} 최상위로 이동`,async()=>{
+      const patch={parent:p||'',updatedAt:Date.now()};note('m',id,{...curDoc('m',id),...patch});
+      if(S.db)await mref(id).update(patch);
+      else{S.managers.set(id,{...m,parent:p||''});refresh();}});
     if(p&&collapsed.delete(p))saveCollapsed();
     toast(p?`${m.name} → ${(S.managers.get(p)||{}).name} 하위로 옮겼어요`:`${m.name}을 독립 매니저로 옮겼어요`);
   }catch(e){fail(e);scheduleEdges();}
@@ -1013,6 +1171,9 @@ const boardsPath=gid=>gid==='main'?'boards':`games/${gid}/boards`;
 const cpathFor=(bid,kind,gid=S.game)=>gid==='main'&&bid==='main'?kind:`${boardsPath(gid)}/${bid}/${kind}`;
 const cpath=kind=>cpathFor(S.board,kind);
 const bdoc=(bid,gid=S.game)=>S.db.doc(boardsPath(gid)+'/'+bid);
+// every doc stored under one page; history is optional so a missing history rule never blocks a delete
+function pageSnaps(bid,gid){return Promise.all(['managers','links','history'].map(k=>{
+  const q=S.db.collection(cpathFor(bid,k,gid)).get();return k==='history'?q.catch(()=>({docs:[]})):q;}));}
 function gameName(g){return(g&&g.name)||(g&&g.id==='main'?(S.mainTitle||'우리 게임'):'이름 없는 게임');}
 function curGame(){return S.games.find(g=>g.id===S.game)||{id:S.game};}
 function mref(id){return S.db.doc(cpath('managers')+'/'+id);}
@@ -1082,7 +1243,7 @@ $('#gDel').onclick=async()=>{
   try{
     const bs=await S.db.collection(boardsPath(id)).get();
     const bids=[...new Set(['main',...bs.docs.map(d=>d.id)])];
-    const snaps=await Promise.all(bids.flatMap(b=>[S.db.collection(cpathFor(b,'managers',id)).get(),S.db.collection(cpathFor(b,'links',id)).get()]));
+    const snaps=(await Promise.all(bids.map(b=>pageSnaps(b,id)))).flat();
     switchGame('main',true);
     await runAll(snaps.flatMap(s=>s.docs.map(d=>()=>d.ref.delete())));
     await runAll(bs.docs.map(d=>()=>d.ref.delete()));
@@ -1115,7 +1276,12 @@ function subscribeBoard(){
     S.managers=new Map(snap.docs.map(d=>[d.id,normM(d.id,d.data())]));gotM=true;if(gotM&&gotL)S.loaded=true;refresh();},onSubErr));
   boardUnsubs.push(S.db.collection(cpath('links')).onSnapshot(snap=>{if(b!==S.board||g!==S.game)return;
     S.links=new Map(snap.docs.map(d=>[d.id,{id:d.id,...d.data()}]));gotL=true;if(gotM&&gotL)S.loaded=true;refresh();},onSubErr));
-  renderAll();
+  // history failures stay inside the history box; editing keeps working without the history rules
+  S.hist=[];S.histErr=false;S.histSel=null;
+  boardUnsubs.push(S.db.collection(cpath('history')).orderBy('at','desc').limit(HIST_MAX).onSnapshot(snap=>{if(b!==S.board||g!==S.game)return;
+    S.hist=snap.docs.map(d=>({id:d.id,...d.data()})).reverse();S.histErr=false;renderHist();},
+    e=>{console.error(e);if(b!==S.board||g!==S.game)return;S.hist=[];S.histErr=e&&e.code==='permission-denied';renderHist();}));
+  renderAll();renderHist();
 }
 function switchBoard(id,force){
   if(id===S.board&&!force)return;
@@ -1181,9 +1347,9 @@ $('#pDel').onclick=async()=>{
   if(!del.classList.contains('armed')){del.classList.add('armed');del.textContent=`한 번 더 누르면 매니저 ${S.managers.size}개와 함께 삭제`;return;}
   const id=S.board,g=S.game,name=boardName(curBoard());
   try{
-    const [ms,ls]=await Promise.all([S.db.collection(cpathFor(id,'managers',g)).get(),S.db.collection(cpathFor(id,'links',g)).get()]);
+    const snaps=await pageSnaps(id,g);
     switchBoard('main',true);
-    await runAll([...ms.docs.map(d=>()=>S.db.doc(cpathFor(id,'managers',g)+'/'+d.id).delete()),...ls.docs.map(d=>()=>S.db.doc(cpathFor(id,'links',g)+'/'+d.id).delete())]);
+    await runAll(snaps.flatMap(s=>s.docs.map(d=>()=>d.ref.delete())));
     await bdoc(id,g).delete();toast(`"${name}" 페이지를 삭제했어요`);
   }catch(e){fail(e);}
 };
@@ -1260,10 +1426,13 @@ async function allJSON(){
 async function importJSON(data){
   const okId=/^[\w-]{1,100}$/;const tasks=[],g=S.game;let nm=0,nl=0;
   const put=(bid,ms,ls)=>{
+    const here=bid===S.board&&g===S.game; // only the open page has a history to record into
     for(const m of ms||[]){if(!okId.test(m.id||''))continue;const {id,...rest}=m;nm++;
-      tasks.push(()=>S.db.doc(cpathFor(bid,'managers',g)+'/'+id).set(plain({...rest,functions:(rest.functions||[]).map(normFn),updatedAt:Date.now()})));}
+      const body=plain({...rest,functions:(rest.functions||[]).map(normFn),updatedAt:Date.now()});if(here)note('m',id,body);
+      tasks.push(()=>S.db.doc(cpathFor(bid,'managers',g)+'/'+id).set(body));}
     for(const l of ls||[]){if(!okId.test(l.id||'')||!l.from||!l.to)continue;const {id,...rest}=l;nl++;
-      tasks.push(()=>S.db.doc(cpathFor(bid,'links',g)+'/'+id).set(plain({...rest,toFn:rest.toFn||'',note:rest.note||'',updatedAt:Date.now()})));}};
+      const body=plain({...rest,toFn:rest.toFn||'',note:rest.note||'',updatedAt:Date.now()});if(here)note('l',id,body);
+      tasks.push(()=>S.db.doc(cpathFor(bid,'links',g)+'/'+id).set(body));}};
   if(Array.isArray(data.pages)){
     for(const p of data.pages){if(!okId.test(p.id||''))continue;
       if(!S.boards.some(b=>b.id===p.id)||p.name)await bdoc(p.id,g).set({name:p.name||'',order:p.id==='main'?0:Date.now(),createdAt:Date.now()});
@@ -1417,7 +1586,7 @@ $('#xAllJson').onclick=async()=>{try{const d=await allJSON();saveFile(safeName((
 $('#xImport').onchange=async e=>{
   const file=e.target.files[0];e.target.value='';if(!file)return;
   let data;try{data=JSON.parse(await file.text());}catch(err){toast('JSON 파일을 읽지 못했어요');return;}
-  try{const r=await importJSON(data);$('#xModal').hidden=true;
+  try{const r=await withHistory('JSON 가져오기',()=>importJSON(data));$('#xModal').hidden=true;
     toast(r.pages>1?`페이지 ${r.pages}개 · 매니저 ${r.nm}개 · 관계 ${r.nl}개를 가져왔어요`:`매니저 ${r.nm}개 · 관계 ${r.nl}개를 이 페이지로 가져왔어요`);didFit=false;}
   catch(err){if(err&&err.message==='format'){toast('매니저 관계도에서 내보낸 JSON이 아니에요');return;}fail(err);}
 };
@@ -1622,9 +1791,10 @@ function renderEditor(){
   $('#revert').onclick=()=>{S.draft=clone(S.managers.get(S.sel));S.dirty=false;S.stale=false;S.fnOpen=null;renderEditor();};
   const del=$('#del');del.onclick=async()=>{
     if(!del.classList.contains('armed')){del.classList.add('armed');del.textContent='한 번 더 누르면 삭제';setTimeout(()=>{if(del.isConnected){del.classList.remove('armed');del.textContent='매니저 삭제';}},3000);return;}
-    const id=S.sel;S.dirty=false;S.sel=null;S.draft=null;
-    try{await delManager(id);toast('매니저를 삭제했어요');}catch(e){fail(e);}renderAll();};
-  panel.querySelectorAll('[data-dellink]').forEach(b=>b.onclick=async()=>{try{await delLink(b.dataset.dellink);}catch(e){fail(e);}});
+    const id=S.sel,name=m.name;S.dirty=false;S.sel=null;S.draft=null;
+    try{await withHistory(`${name} 삭제`,()=>delManager(id));toast('매니저를 삭제했어요');}catch(e){fail(e);}renderAll();};
+  panel.querySelectorAll('[data-dellink]').forEach(b=>b.onclick=async()=>{const l=S.links.get(b.dataset.dellink);
+    try{await withHistory(l?'관계 삭제: '+linkLabel(l):'관계 삭제',()=>delLink(b.dataset.dellink));}catch(e){fail(e);}});
 
   // add relation: function picker follows target + direction
   const rTo=$('#r-to'),rDir=$('#r-dir'),rFn=$('#r-fn'),rKind=$('#r-kind');
@@ -1642,7 +1812,8 @@ function renderEditor(){
     $('#r-add').onclick=async()=>{
       const to=rTo.value;if(!to){rTo.focus();toast('연결할 대상 매니저를 고르세요');return;}
       const dir=rDir.value;const from=dir==='out'?m.id:to,target=dir==='out'?to:m.id;
-      try{await putLink(uid('l'),{from,to:target,kind:rKind.value,toFn:rFn.value,note:$('#r-note').value.trim()});toast('관계를 추가했어요');}catch(e){fail(e);}};
+      const link={from,to:target,kind:rKind.value,toFn:rFn.value,note:$('#r-note').value.trim()};
+      try{await withHistory('관계 추가: '+linkLabel(link),()=>putLink(uid('l'),link));toast('관계를 추가했어요');}catch(e){fail(e);}};
   }
 }
 function runParse(){
@@ -1662,8 +1833,9 @@ async function doSave(){
   const keep=new Set(d.functions.filter(f=>f.sig||f.desc).map(f=>f.id));
   const orphan=[...S.links.values()].filter(l=>l.to===d.id&&l.toFn&&!keep.has(l.toFn));
   S.saving=true;S.dirty=false;S.stale=false;
-  try{await putManager(d.id,{...d,name:d.name.trim(),x:cur?cur.x:d.x,y:cur?cur.y:d.y});
-    for(const l of orphan)await patchLink(l.id,{toFn:''});
+  try{await withHistory(describeSave(cur,d),async()=>{
+      await putManager(d.id,{...d,name:d.name.trim(),x:cur?cur.x:d.x,y:cur?cur.y:d.y});
+      for(const l of orphan)await patchLink(l.id,{toFn:''});});
     toast(orphan.length?`저장했어요. 삭제된 함수를 쓰던 관계 ${orphan.length}개는 매니저 단위로 바뀌었어요`:'저장했어요');}
   catch(e){S.dirty=true;fail(e);}
   S.saving=false;const m=S.managers.get(d.id);if(m&&!S.dirty){S.draft=clone(m);lastSelSig=contentSig(m);}renderPanel();
@@ -1763,7 +1935,8 @@ async function addManager(parentId){
   if(S.dirty&&!confirmLeave())return;
   if(S.view!=='map')setView('map');
   const id=uid('m');
-  try{S.dirty=false;await putManager(id,{name:uniqueName('NewManager'),category:'system',desc:'',functions:[],parent:parentId||'',x:0,y:0});
+  const name=uniqueName('NewManager');
+  try{S.dirty=false;await withHistory(`${name} 추가`,()=>putManager(id,{name,category:'system',desc:'',functions:[],parent:parentId||'',x:0,y:0}));
     if(parentId&&collapsed.delete(parentId))saveCollapsed();
     select(id);centerOn(id);const f=$('#f-name');if(f){f.focus();f.select();}}
   catch(e){fail(e);}
@@ -1804,13 +1977,14 @@ $('#loadSample').onclick=async()=>{
       ['OnSaveCompleted : Action<int>','저장 완료 이벤트','event','public','',false]],40,40]];
   const ids={},fids={};
   try{
-    for(const [name,category,desc,fns,x,y] of ms){const id=uid('m');ids[name]=id;
-      const functions=fns.map(([sig,d,kind,access,group,star])=>{const fid=uid('f');fids[name+'.'+shortName(sig)]=fid;return{id:fid,sig,desc:d,kind,access,group,star};});
-      await putManager(id,{name:uniqueName(name),category,desc,functions,x,y,parent:name==='GameManager'?'':ids.GameManager});}
-    const ls=[['GameManager','SaveManager','call','Save'],['GameManager','SaveManager','call','Load'],
-      ['GameManager','AudioManager','call','PlayBgm'],['UIManager','InputManager','event','OnActionPressed'],
-      ['UIManager','GameManager','event','OnStateChanged'],['UIManager','SaveManager','event','OnSaveCompleted']];
-    for(const [a,b,kind,fn] of ls)await putLink(uid('l'),{from:ids[a],to:ids[b],kind,toFn:fn?fids[b+'.'+fn]:''});
+    await withHistory('예시 구조 불러오기',async()=>{
+      for(const [name,category,desc,fns,x,y] of ms){const id=uid('m');ids[name]=id;
+        const functions=fns.map(([sig,d,kind,access,group,star])=>{const fid=uid('f');fids[name+'.'+shortName(sig)]=fid;return{id:fid,sig,desc:d,kind,access,group,star};});
+        await putManager(id,{name:uniqueName(name),category,desc,functions,x,y,parent:name==='GameManager'?'':ids.GameManager});}
+      const ls=[['GameManager','SaveManager','call','Save'],['GameManager','SaveManager','call','Load'],
+        ['GameManager','AudioManager','call','PlayBgm'],['UIManager','InputManager','event','OnActionPressed'],
+        ['UIManager','GameManager','event','OnStateChanged'],['UIManager','SaveManager','event','OnSaveCompleted']];
+      for(const [a,b,kind,fn] of ls)await putLink(uid('l'),{from:ids[a],to:ids[b],kind,toFn:fn?fids[b+'.'+fn]:''});});
     toast('예시 구조를 불러왔어요. 필요 없는 매니저는 삭제하세요');
     setTimeout(fit,100);
   }catch(e){fail(e);}
