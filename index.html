@@ -150,6 +150,10 @@ svg.edges{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;p
 .legend span{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .legend svg{width:28px;height:8px;overflow:visible}
 .legend .sep{width:1px;background:var(--line);align-self:stretch}
+.legend .lgk{display:flex;align-items:center;gap:6px;white-space:nowrap;border:1px solid transparent;background:transparent;border-radius:6px;padding:2px 6px;margin:-3px -4px;font-size:inherit;color:inherit}
+.legend .lgk:hover{border-color:var(--line);color:var(--ink)}
+.legend .lgk[aria-pressed="true"]{border-color:var(--sel);color:var(--ink);font-weight:600}
+.legend.kf .lgk[aria-pressed="false"]{opacity:.45}
 
 .empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;z-index:4;pointer-events:none}
 .empty .card{pointer-events:auto;background:var(--raise);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:22px 24px;max-width:380px}
@@ -460,9 +464,9 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
       </div>
       <div class="legend" aria-label="범례">
         <span><svg viewBox="0 0 28 8"><path d="M14,0 V4 M3,4 H25 M3,4 V8 M25,4 V8" class="tree-edge"/></svg>상위·하위</span>
-        <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-call"/></svg>호출</span>
-        <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-depend"/></svg>참조</span>
-        <span><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-event"/></svg>이벤트 구독</span>
+        <button class="lgk" data-kind="call" aria-pressed="false" title="호출 관계선만 보기 (여러 개 선택 가능)"><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-call"/></svg>호출</button>
+        <button class="lgk" data-kind="depend" aria-pressed="false" title="참조 관계선만 보기 (여러 개 선택 가능)"><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-depend"/></svg>참조</button>
+        <button class="lgk" data-kind="event" aria-pressed="false" title="이벤트 구독 관계선만 보기 (여러 개 선택 가능)"><svg viewBox="0 0 28 8"><line x1="0" y1="4" x2="28" y2="4" class="edge k-event"/></svg>이벤트 구독</button>
         
         <span class="sep opt"></span>
         <span class="opt"><i class="kd method">M</i>메서드</span>
@@ -945,6 +949,17 @@ $('#fitBtn').onclick=fit;
 function setLinkMode(v){S.linkMode=v;document.querySelectorAll('[data-lm]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.lm===v));
   try{localStorage.setItem('mm.links',v);}catch(e){}scheduleEdges();}
 document.querySelectorAll('[data-lm]').forEach(b=>b.onclick=()=>setLinkMode(b.dataset.lm));
+// relation-kind filter picked from the legend; nothing picked = every kind
+S.kinds=new Set();try{JSON.parse(localStorage.getItem('mm.kinds')||'[]').forEach(k=>KINDS[k]&&S.kinds.add(k));}catch(e){}
+const kindShown=k=>!S.kinds.size||S.kinds.has(KINDS[k]?k:'call');
+function syncKinds(){document.querySelectorAll('.lgk').forEach(b=>b.setAttribute('aria-pressed',S.kinds.has(b.dataset.kind)));$('.legend').classList.toggle('kf',S.kinds.size>0);}
+document.querySelectorAll('.lgk').forEach(b=>b.onclick=()=>{const k=b.dataset.kind;S.kinds.has(k)?S.kinds.delete(k):S.kinds.add(k);
+  try{localStorage.setItem('mm.kinds',JSON.stringify([...S.kinds]));}catch(e){}
+  // a filter with nothing drawn would look broken, so make the picked kinds visible
+  if(S.kinds.size&&(S.linkMode==='none'||(S.linkMode==='sel'&&!S.sel)))setLinkMode('all');
+  syncKinds();scheduleEdges();
+  toast(S.kinds.size?[...S.kinds].map(x=>KINDS[x].label).join('·')+' 관계선만 보여요':'모든 관계선을 보여요');});
+syncKinds();
 
 /* ---------- node drag: drop on a card to make it the parent ---------- */
 let drag=null;
@@ -1147,7 +1162,7 @@ function renderEdges(){
   const focus=S.sel||(S.linkMode==='sel'?hoverId:null);
   const show=[...S.links.values()].filter(l=>{
     if(l.from===l.to||isTreeLink(l)||!pos.has(l.from)||!pos.has(l.to))return false;
-    if(S.linkMode==='none')return false;
+    if(S.linkMode==='none'||!kindShown(l.kind))return false;
     if(S.linkMode==='sel')return !!focus&&(l.from===focus||l.to===focus);
     return true;});
   const defs=`<defs>${Object.keys(KINDS).map(k=>`<marker id="ar-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" style="fill:var(--k-${k})"/></marker>`).join('')}
@@ -1540,7 +1555,7 @@ function renderExport(scale,maxW){
   ctx.font=`12px ${XF.ui}`;ctx.fillStyle=XC.muted;
   ctx.fillText(`${proj?proj+' · ':''}매니저 ${S.managers.size}개 · ${new Date().toLocaleDateString('ko-KR')}`,pad,pad+40);
   // legend (own line, left to right)
-  const items=[['상위·하위','tree']];if(X.links!=='off')items.push(['호출','call'],['참조','depend'],['이벤트 구독','event']);
+  const items=[['상위·하위','tree']];if(X.links!=='off')items.push(...[['호출','call'],['참조','depend'],['이벤트 구독','event']].filter(([,k])=>kindShown(k)));
   let lx=pad;const ly=pad+64;ctx.font=`11.5px ${XF.ui}`;ctx.textBaseline='middle';
   for(const [t,k] of items){ctx.save();ctx.strokeStyle=k==='tree'?XC.tree:XC.k[k];ctx.lineWidth=k==='event'?2.2:1.8;ctx.setLineDash(k==='depend'?[6,4]:k==='event'?[2,3]:[]);
     ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(lx+22,ly);ctx.stroke();ctx.restore();lx+=28;
@@ -1557,7 +1572,7 @@ function renderExport(scale,maxW){
   // cross relations
   let G=[];
   if(X.links!=='off'){
-    G=crossGeom([...S.links.values()].filter(l=>l.from!==l.to&&!isTreeLink(l)&&P.has(l.from)&&P.has(l.to)),P);
+    G=crossGeom([...S.links.values()].filter(l=>l.from!==l.to&&!isTreeLink(l)&&kindShown(l.kind)&&P.has(l.from)&&P.has(l.to)),P);
     for(const g of G){ctx.save();ctx.strokeStyle=XC.k[g.kind];ctx.lineWidth=g.kind==='event'?2.2:g.kind==='own'?2.6:1.8;
       ctx.setLineDash(g.kind==='depend'?[7,5]:g.kind==='event'?[2,4]:[]);
       ctx.beginPath();ctx.moveTo(g.s.x,g.s.y);ctx.quadraticCurveTo(g.mx,g.my,g.e.x,g.e.y);ctx.stroke();
