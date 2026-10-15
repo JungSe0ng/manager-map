@@ -150,6 +150,7 @@ svg.edges{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;p
 .legend span{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .legend svg{width:28px;height:8px;overflow:visible}
 .legend .sep{width:1px;background:var(--line);align-self:stretch}
+.dragtip{position:fixed;z-index:70;pointer-events:none;background:var(--ink);color:var(--paper);font-size:12px;padding:4px 9px;border-radius:6px;box-shadow:var(--shadow);white-space:nowrap}
 .legend .lgk{display:flex;align-items:center;gap:6px;white-space:nowrap;border:1px solid transparent;background:transparent;border-radius:6px;padding:2px 6px;margin:-3px -4px;font-size:inherit;color:inherit}
 .legend .lgk:hover{border-color:var(--line);color:var(--ink)}
 .legend .lgk[aria-pressed="true"]{border-color:var(--sel);color:var(--ink);font-weight:600}
@@ -722,14 +723,27 @@ async function putManager(id,data){
   const body={name:data.name||'Unnamed',category:data.category||'system',desc:data.desc||'',
     functions:(data.functions||[]).filter(f=>f.sig||f.desc).map(f=>({id:f.id||uid('f'),sig:f.sig||'',desc:f.desc||'',kind:f.kind||'method',access:f.access||'public',group:f.group||'',star:!!f.star})),
     parent:data.parent||'',x:Math.round(data.x||0),y:Math.round(data.y||0),updatedAt:Date.now(),...by()};
+  // set() replaces the whole doc, so carry over the free-layout position and reference link
+  const keep=S.managers.get(id)||{};
+  for(const k of ['px','py']){const v=data[k]??keep[k];if(typeof v==='number')body[k]=Math.round(v);}
+  const ref=data.ref??keep.ref;if(ref)body.ref=ref;
   note('m',id,body);
   if(S.db) await mref(id).set(body);
   else{S.managers.set(id,normM(id,body));refresh();}
 }
+// free layout: px/py on a manager pins it; a page with no pinned card keeps the automatic org chart
+const isPlaced=m=>!!m&&typeof m.px==='number'&&typeof m.py==='number';
+const freeMode=()=>[...S.managers.values()].some(isPlaced);
 async function moveManager(id,x,y){
-  x=Math.round(x);y=Math.round(y);
-  if(S.db) await mref(id).update({x,y});
-  else{const m=S.managers.get(id);if(m){S.managers.set(id,{...m,x,y});refresh();}}
+  const m=S.managers.get(id);if(!m)return;
+  // the first move on an auto-arranged page pins every card where it is now, so nothing else jumps
+  const first=!freeMode();
+  try{await withHistory(first?`자유 배치 시작 (${m.name} 이동)`:`${m.name} 위치 이동`,async()=>{
+      const tasks=[];const pin=(k,px,py)=>{const patch={px:Math.round(px),py:Math.round(py)};note('m',k,{...curDoc('m',k),...patch});tasks.push(()=>mref(k).update(patch));};
+      if(first)for(const [k,p] of pos)if(k!==id)pin(k,p.x,p.y);
+      pin(id,x,y);await runAll(tasks);});
+    if(first)toast('자유 배치로 바꿨어요. 이제 카드를 원하는 곳에 둘 수 있어요');
+  }catch(e){fail(e);scheduleEdges();}
 }
 async function delManager(id){
   const up=TREE.P.get(id)||'';
@@ -875,12 +889,14 @@ function isHidden(id){return ancestors(id).some(a=>collapsed.has(a));}
 function visKids(id){return collapsed.has(id)?[]:(TREE.C.get(id)||[]);}
 function isTreeLink(l){return l.kind==='own'&&TREE.P.get(l.to)===l.from;}
 function relCount(id){let n=0;for(const l of S.links.values()){if(l.from===l.to||isTreeLink(l))continue;if(l.from===id||l.to===id)n++;}return n;}
-async function setParent(id,p){
+async function setParent(id,p,at){
   const m=S.managers.get(id);if(!m)return;
   if(p&&(p===id||descendants(id).has(p))){toast('자기 하위 매니저 아래로는 옮길 수 없어요');scheduleEdges();return;}
   try{
     await withHistory(p?`${m.name} → ${(S.managers.get(p)||{}).name} 하위로 이동`:`${m.name} 최상위로 이동`,async()=>{
-      const patch={parent:p||'',updatedAt:Date.now()};note('m',id,{...curDoc('m',id),...patch});
+      const patch={parent:p||'',updatedAt:Date.now()};
+      if(at){patch.px=Math.round(at.x);patch.py=Math.round(at.y);}
+      note('m',id,{...curDoc('m',id),...patch});
       if(S.db)await mref(id).update(patch);
       else{S.managers.set(id,{...m,parent:p||''});refresh();}});
     if(p&&collapsed.delete(p))saveCollapsed();
@@ -961,34 +977,58 @@ document.querySelectorAll('.lgk').forEach(b=>b.onclick=()=>{const k=b.dataset.ki
   toast(S.kinds.size?[...S.kinds].map(x=>KINDS[x].label).join('·')+' 관계선만 보여요':'모든 관계선을 보여요');});
 syncKinds();
 
-/* ---------- node drag: drop on a card to make it the parent ---------- */
-let drag=null;
+/* ---------- node drag: move freely; hold Shift and drop on a card to make it the parent ---------- */
+let drag=null,dragTip=null;
 function clearDrop(){document.querySelectorAll('.node.drop,.lane.drop').forEach(x=>x.classList.remove('drop'));}
+// first free spot under a parent's existing children (free layout)
+function slotUnder(pid,skip){const pp=pos.get(pid);if(!pp)return null;
+  const ks=(TREE.C.get(pid)||[]).filter(k=>k!==skip&&pos.has(k));
+  return{x:pp.x,y:Math.max(pp.y+pp.h,...ks.map(k=>pos.get(k).y+pos.get(k).h))+VG};}
+// what dropping at this point would do: drives the highlight, the cursor tip and the drop itself
+function dragAim(cx,cy,shift){
+  const d=drag;d.shift=shift;d.cx=cx;d.cy=cy;
+  const lane=shift&&TREE.P.has(d.id);
+  if(lane!==!!d.laneOn){d.laneOn=lane;layout();} // the auto-layout drop lane only appears while Shift is held
+  let t=null,hit=null;
+  if(shift){const els=document.elementsFromPoint(cx,cy);
+    hit=els.map(x=>x.closest&&x.closest('.node')).find(n=>n&&n!==d.el);
+    t=hit&&!d.bad.has(hit.dataset.id)?hit.dataset.id:null;
+    if(!t&&TREE.P.has(d.id)&&(FREE||(laneEl&&!laneEl.hidden&&els.includes(laneEl))))t='__root';}
+  if(t!==d.target){clearDrop();d.target=t;if(t==='__root'){if(!FREE)laneEl.classList.add('drop');}else if(t)hit.classList.add('drop');}
+  if(!dragTip){dragTip=document.createElement('div');dragTip.className='dragtip';document.body.appendChild(dragTip);}
+  dragTip.hidden=false;dragTip.style.left=(cx+14)+'px';dragTip.style.top=(cy+18)+'px';
+  dragTip.textContent=t==='__root'?'놓으면 독립 매니저로 빼기':t?`놓으면 ‘${(S.managers.get(t)||{}).name}’ 하위로 넣기`
+    :shift?'놓으면 이 자리로 이동':'놓으면 이 자리로 이동 · Shift: 하위로 넣기';
+}
+document.addEventListener('keydown',e=>{if(e.key==='Shift'&&drag&&drag.moved&&!drag.shift)dragAim(drag.cx,drag.cy,true);});
+document.addEventListener('keyup',e=>{if(e.key==='Shift'&&drag&&drag.moved&&drag.shift)dragAim(drag.cx,drag.cy,false);});
 function attachDrag(el){
   el.addEventListener('pointerdown',e=>{
     if(e.target.closest('[data-tog],[data-sub]')){e.stopPropagation();return;}
     if(e.button!==0&&e.pointerType==='mouse')return;e.stopPropagation();
     const id=el.dataset.id,p=pos.get(id);if(!p)return;
     el.setPointerCapture(e.pointerId);
-    drag={id,el,sx:e.clientX,sy:e.clientY,ox:p.x,oy:p.y,moved:false,target:null,bad:null};
+    drag={id,el,sx:e.clientX,sy:e.clientY,ox:p.x,oy:p.y,nx:p.x,ny:p.y,moved:false,target:null,bad:null,shift:false};
   });
   el.addEventListener('pointermove',e=>{
     if(!drag||drag.el!==el)return;const dx=(e.clientX-drag.sx)/T.k,dy=(e.clientY-drag.sy)/T.k;
     if(!drag.moved&&Math.abs(dx)+Math.abs(dy)<6/T.k)return;
     if(!S.canWrite)return;
     if(!drag.moved){drag.moved=true;drag.bad=descendants(drag.id);drag.bad.add(drag.id);el.classList.add('dragging');layout();}
-    el.style.left=(drag.ox+dx)+'px';el.style.top=(drag.oy+dy)+'px';
-    const els=document.elementsFromPoint(e.clientX,e.clientY);
-    const hit=els.map(x=>x.closest&&x.closest('.node')).find(n=>n&&n!==el);
-    let t=hit&&!drag.bad.has(hit.dataset.id)?hit.dataset.id:null;
-    if(!t&&laneEl&&!laneEl.hidden&&els.includes(laneEl)&&TREE.P.has(drag.id))t='__root';
-    if(t!==drag.target){clearDrop();drag.target=t;if(t==='__root')laneEl.classList.add('drop');else if(t)hit.classList.add('drop');}
+    drag.nx=drag.ox+dx;drag.ny=drag.oy+dy;
+    el.style.left=drag.nx+'px';el.style.top=drag.ny+'px';
+    dragAim(e.clientX,e.clientY,e.shiftKey);
   });
-  const up=()=>{
-    if(!drag||drag.el!==el)return;const d=drag;drag=null;el.classList.remove('dragging');clearDrop();
+  const up=e=>{
+    if(!drag||drag.el!==el)return;
+    if(drag.moved&&e.type==='pointerup'&&e.shiftKey!==drag.shift)dragAim(e.clientX,e.clientY,e.shiftKey);
+    const d=drag;drag=null;el.classList.remove('dragging');clearDrop();if(dragTip)dragTip.hidden=true;
     if(!d.moved){select(d.id);return;}
-    const cur=TREE.P.get(d.id)||'';const next=d.target==='__root'?'':d.target;
-    if(d.target&&next!==cur)setParent(d.id,next);
+    if(e.type==='pointercancel'){scheduleEdges();return;}
+    if(d.target){const next=d.target==='__root'?'':d.target;
+      // free layout: a new child goes under its parent, a card pulled out stays where it was dropped
+      if(next!==(TREE.P.get(d.id)||''))setParent(d.id,next,!FREE?null:next?slotUnder(next,d.id):{x:d.nx,y:d.ny});}
+    else moveManager(d.id,d.nx,d.ny);
     scheduleEdges();
   };
   el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
@@ -1098,19 +1138,52 @@ function computeLayout(H,opt){
     P.set(id,{x:c*(NW+HG),y:rowY,h:H(id)});rowH=Math.max(rowH,H(id));});
   return{pos:P,MODE:M,lane};
 }
+// free layout: pinned cards stay put; unpinned ones go under their parent's children, or in a row below everything
+function computeFreeLayout(H,opt){
+  const kids=opt.kids,P=new Map(),order=[];
+  const walk=id=>{order.push(id);kids(id).forEach(walk);};TREE.roots.forEach(walk);
+  for(const id of order){const m=S.managers.get(id);if(isPlaced(m))P.set(id,{x:m.px,y:m.py,h:H(id)});}
+  let left=0,bottom=0;
+  if(P.size){left=Math.min(...[...P.values()].map(p=>p.x));bottom=Math.max(...[...P.values()].map(p=>p.y+p.h));}
+  let rowX=left;const rowY=bottom+VG*1.5;const nth=new Map();
+  for(const id of order){if(P.has(id))continue;
+    const par=TREE.P.get(id),pp=par&&P.get(par);
+    if(pp){const sib=kids(par).filter(k=>k!==id&&P.has(k)&&isPlaced(S.managers.get(k)));
+      const y=Math.max(pp.y+pp.h,...sib.map(k=>P.get(k).y+P.get(k).h))+VG;const n=nth.get(par)||0;nth.set(par,n+1);
+      P.set(id,{x:pp.x+n*(NW+HG),y,h:H(id)});}
+    else{P.set(id,{x:rowX,y:rowY,h:H(id)});rowX+=NW+HG;}}
+  return{pos:P,MODE:new Map(),lane:{show:false,top:0,width:0,count:0},free:true};
+}
+// free layout hierarchy lines: a shared bus when every child sits below the parent, else one elbow per child
+function freeTreePaths(P,kids){
+  const out=[];
+  for(const [id,p] of P){const ks=kids(id).filter(k=>P.has(k));if(!ks.length)continue;
+    const px=p.x+NW/2,py=p.y+p.h;let d='';
+    if(ks.every(k=>P.get(k).y>py+12)){
+      const by=Math.max(py+12,Math.min(...ks.map(k=>P.get(k).y))-VG/2);d=`M${px},${py}V${by}`;
+      const xs=ks.map(k=>P.get(k).x+NW/2),mn=Math.min(px,...xs),mx=Math.max(px,...xs);
+      if(mx-mn>0.5)d+=`M${mn},${by}H${mx}`;ks.forEach(k=>{const q=P.get(k);d+=`M${q.x+NW/2},${by}V${q.y}`;});}
+    else ks.forEach(k=>{const q=P.get(k),my=(py+q.y)/2;d+=`M${px},${py}V${my}H${q.x+NW/2}V${q.y}`;});
+    out.push({id,ks,d});}
+  return out;
+}
+let FREE=false;
 function layout(){
   if(S.view!=='map'||vp.hidden)return;
   const H=id=>{const el=nodeEls.get(id);return el&&!el.hidden?el.offsetHeight:0;};
   if(!laneEl){laneEl=document.createElement('div');laneEl.className='lane';world.appendChild(laneEl);}
-  const draggingChild=!!(drag&&drag.moved&&TREE.P.has(drag.id));
-  const loneN=TREE.roots.filter(r=>!(TREE.C.get(r)||[]).length).length;
-  laneEl.classList.toggle('dropzone',draggingChild);
-  laneEl.innerHTML=draggingChild?'<b>여기에 놓으면 독립 매니저로 옮겨요</b>'
-    :`<b>독립 매니저 ${loneN}개</b> · 상위·하위 없음. 카드를 다른 카드 위에 끌어다 놓으면 그 아래로 들어가요`;
-  laneEl.hidden=!loneN&&!draggingChild;
-  const R=computeLayout(H,{kids:visKids,laneH:laneEl.hidden?0:laneEl.offsetHeight,forceLane:draggingChild});
+  FREE=freeMode();let R;
+  if(FREE){laneEl.hidden=true;R=computeFreeLayout(H,{kids:visKids});}
+  else{
+    const draggingChild=!!(drag&&drag.moved&&drag.laneOn);
+    const loneN=TREE.roots.filter(r=>!(TREE.C.get(r)||[]).length).length;
+    laneEl.classList.toggle('dropzone',draggingChild);
+    laneEl.innerHTML=draggingChild?'<b>여기에 놓으면 독립 매니저로 옮겨요</b>'
+      :`<b>독립 매니저 ${loneN}개</b> · 상위·하위 없음. Shift를 누른 채 카드를 다른 카드 위에 놓으면 그 아래로 들어가요`;
+    laneEl.hidden=!loneN&&!draggingChild;
+    R=computeLayout(H,{kids:visKids,laneH:laneEl.hidden?0:laneEl.offsetHeight,forceLane:draggingChild});
+    laneEl.style.left='0px';laneEl.style.top=R.lane.top+'px';laneEl.style.width=R.lane.width+'px';}
   pos.clear();R.pos.forEach((v,k)=>pos.set(k,v));MODE=R.MODE;
-  laneEl.style.left='0px';laneEl.style.top=R.lane.top+'px';laneEl.style.width=R.lane.width+'px';
   for(const [id,el] of nodeEls){if(drag&&drag.moved&&drag.id===id)continue;const p=pos.get(id);if(p){el.style.left=p.x+'px';el.style.top=p.y+'px';}}
   renderEdges();
 }
@@ -1156,7 +1229,7 @@ function renderEdges(){
   if(S.view!=='map')return;
   labelEls.forEach(e=>e.remove());labelEls=[];
   let tree='';
-  for(const t of treePaths(pos,MODE,visKids)){
+  for(const t of (FREE?freeTreePaths(pos,visKids):treePaths(pos,MODE,visKids))){
     const faint=S.sel&&t.id!==S.sel&&!t.ks.includes(S.sel)?' faint':'';
     tree+=`<path class="tree-edge${faint}" d="${t.d}"/>`;}
   const focus=S.sel||(S.linkMode==='sel'?hoverId:null);
@@ -1541,7 +1614,8 @@ function renderExport(scale,maxW){
   buildTree();
   const kids=X.expandAll?(id=>TREE.C.get(id)||[]):visKids;
   const specs=new Map();for(const m of S.managers.values())specs.set(m.id,cardSpec(m,X.content));
-  const R=computeLayout(id=>specs.get(id).h,{kids,laneH:22,forceLane:false,stackMin:Infinity});const P=R.pos;
+  const free=freeMode(),HX=id=>specs.get(id).h;
+  const R=free?computeFreeLayout(HX,{kids}):computeLayout(HX,{kids,laneH:22,forceLane:false,stackMin:Infinity});const P=R.pos;
   if(!P.size)return null;
   let a=1e9,b=1e9,c=-1e9,d=-1e9;for(const p of P.values()){a=Math.min(a,p.x);b=Math.min(b,p.y);c=Math.max(c,p.x+NW);d=Math.max(d,p.y+p.h);}
   if(R.lane.show){b=Math.min(b,R.lane.top);c=Math.max(c,R.lane.width);}
@@ -1565,7 +1639,7 @@ function renderExport(scale,maxW){
   ctx.translate(pad-a,pad+headH-b);
   // hierarchy lines
   ctx.save();ctx.strokeStyle=XC.tree;ctx.lineWidth=1.6;ctx.lineJoin='round';
-  for(const t of treePaths(P,R.MODE,kids))ctx.stroke(new Path2D(t.d));ctx.restore();
+  for(const t of (free?freeTreePaths(P,kids):treePaths(P,R.MODE,kids)))ctx.stroke(new Path2D(t.d));ctx.restore();
   // independent lane label
   if(R.lane.show){ctx.save();ctx.setLineDash([5,4]);ctx.strokeStyle=XC.line;ctx.lineWidth=1.5;ctx.beginPath();ctx.moveTo(0,R.lane.top);ctx.lineTo(R.lane.width,R.lane.top);ctx.stroke();ctx.restore();
     ctx.font=`600 12.5px ${XF.ui}`;ctx.fillStyle=XC.ink;ctx.textBaseline='middle';ctx.fillText(`독립 매니저 ${R.lane.count}개`,0,R.lane.top+14);}
@@ -1672,8 +1746,8 @@ function renderList(){
       :`<p class="hint" style="margin-top:12px">${all.length?'검색 결과가 없어요.':(S.loaded?'왼쪽 위 <b>+ 매니저</b>로 첫 매니저를 등록하세요.':'불러오는 중…')}</p>`}
     <h3>관계 종류</h3>
     <ul class="kinds"><li><svg viewBox="0 0 34 8" width="34" height="8" style="overflow:visible"><path d="M17,0 V4 M3,4 H31 M3,4 V8 M31,4 V8" class="tree-edge"/></svg><div><b>상위·하위</b><small>카드 배치로 표시 · 상위 매니저가 하위를 생성·소유</small></div></li>${Object.entries(KINDS).filter(([k])=>k!=='own').map(([k,v])=>`<li><svg viewBox="0 0 34 8" width="34" height="8" style="overflow:visible"><line x1="0" y1="4" x2="34" y2="4" class="edge k-${k}"/></svg><div><b>${v.label}</b><small>A → B : A가 B의 ${v.desc}</small></div></li>`).join('')}</ul>
-    <h3>조직도 배치</h3>
-    <p class="hint">카드는 상위·하위 관계에 따라 자동으로 정렬돼요. 카드를 다른 카드 위에 끌어다 놓으면 그 아래로 옮겨지고, 카드 아래의 <b>하위 N</b>을 누르면 가지를 접을 수 있어요. 호출·참조·이벤트 관계선은 기본으로 선택한 매니저 것만 보여요.</p>
+    <h3>배치</h3>
+    <p class="hint">처음엔 상위·하위 관계에 따라 자동으로 정렬돼요. 카드를 끌면 원하는 곳에 둘 수 있고, 그때부터 페이지가 자유 배치로 바뀌어요. <b>Shift</b>를 누른 채 다른 카드 위에 놓으면 그 하위로, 빈 곳에 놓으면 독립 매니저가 돼요. 카드 아래의 <b>하위 N</b>을 누르면 가지를 접을 수 있어요. 호출·참조·이벤트 관계선은 기본으로 선택한 매니저 것만 보이고, 아래 범례를 누르면 원하는 종류만 볼 수 있어요.</p>
     <h3>함수가 많을 때</h3>
     <p class="hint">축소하면 이름만, 평소엔 ★핵심 함수와 다른 매니저가 쓰는 함수만 보여요. 도구막대의 <b>함수 전체</b>를 켜면 Public 함수 전체가 그룹별로, <b>★핵심만</b>을 켜면 ★ 함수만 보입니다. 카드의 <b>함수 전체</b> 버튼으로 하나만 자세히 볼 수도 있어요(내 화면에만 적용). 전체 목록 관리는 상단의 <b>함수 표</b>에서 하세요.</p>`;
   const qi=$('#q');qi.oninput=()=>{S.listQ=qi.value;const p=qi.selectionStart;renderList();const n=$('#q');n.focus();n.setSelectionRange(p,p);};
@@ -1965,13 +2039,17 @@ function setView(v){S.view=v;$('#vMap').setAttribute('aria-pressed',v==='map');$
 $('#vMap').onclick=()=>setView('map');$('#vTable').onclick=()=>setView('table');
 
 /* ---------- add / sample ---------- */
-async function addManager(parentId){
+function viewCenter(){const r=vp.getBoundingClientRect();return{x:(r.width/2-T.x)/T.k-NW/2,y:(r.height/2-T.y)/T.k-40};}
+async function addManager(parentId,opt){
+  opt=opt||{};
   if(!S.canWrite){toast('보기 전용이라 추가할 수 없어요');return;}
   if(S.dirty&&!confirmLeave())return;
   if(S.view!=='map')setView('map');
   const id=uid('m');
-  const name=uniqueName('NewManager');
-  try{S.dirty=false;await withHistory(`${name} 추가`,()=>putManager(id,{name,category:'system',desc:'',functions:[],parent:parentId||'',x:0,y:0}));
+  const name=uniqueName(opt.name||'NewManager');
+  // free layout pins the new card where it will be seen; an auto-arranged page stays automatic
+  const at=freeMode()?(opt.at||(parentId&&slotUnder(parentId))||viewCenter()):null;
+  try{S.dirty=false;await withHistory(`${name} 추가`,()=>putManager(id,{name,category:'system',desc:'',functions:[],parent:parentId||'',x:0,y:0,...(at?{px:at.x,py:at.y}:{})}));
     if(parentId&&collapsed.delete(parentId))saveCollapsed();
     select(id);centerOn(id);const f=$('#f-name');if(f){f.focus();f.select();}}
   catch(e){fail(e);}
