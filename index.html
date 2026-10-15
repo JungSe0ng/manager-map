@@ -150,6 +150,22 @@ svg.edges{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;p
 .legend span{display:flex;align-items:center;gap:6px;white-space:nowrap}
 .legend svg{width:28px;height:8px;overflow:visible}
 .legend .sep{width:1px;background:var(--line);align-self:stretch}
+/* reference cards + Space palette */
+.node.ref{border-style:dashed;border-color:var(--muted)}
+.n-refl{font-size:11px;color:var(--sel);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.n-refl.miss{color:var(--danger)}
+.refnote{background:color-mix(in srgb,var(--sel) 10%,var(--panel));border:1px solid var(--sel);border-radius:7px;padding:8px 10px;font-size:12.5px;line-height:1.5;margin-bottom:12px;display:flex;gap:8px;align-items:center;justify-content:space-between}
+.refnote .btn{flex:none;white-space:nowrap}
+.palette{position:fixed;z-index:75;width:380px;max-width:calc(100vw - 24px);background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:10px;display:flex;flex-direction:column;gap:6px}
+.palres{list-style:none;margin:0;padding:0;max-height:min(50vh,360px);overflow:auto;display:flex;flex-direction:column;gap:1px}
+.palres .pg{font-size:11px;letter-spacing:.04em;color:var(--muted);padding:8px 8px 2px}
+.palres button{display:flex;flex-direction:column;align-items:flex-start;gap:1px;width:100%;border:0;background:transparent;text-align:left;padding:6px 8px;border-radius:6px;color:var(--ink)}
+.palres button:hover{background:var(--soft)}
+.palres button.on{background:var(--soft);box-shadow:inset 0 0 0 1px var(--sel)}
+.palres button b{font-family:var(--f-mono);font-weight:600;font-size:13px}
+.palres button small{font-size:11.5px;color:var(--muted)}
+.palhint{font-size:11px;color:var(--muted)}
+kbd{font-family:var(--f-mono);font-size:10.5px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;background:var(--raise);color:var(--ink)}
 .dragtip{position:fixed;z-index:70;pointer-events:none;background:var(--ink);color:var(--paper);font-size:12px;padding:4px 9px;border-radius:6px;box-shadow:var(--shadow);white-space:nowrap}
 .legend .lgk{display:flex;align-items:center;gap:6px;white-space:nowrap;border:1px solid transparent;background:transparent;border-radius:6px;padding:2px 6px;margin:-3px -4px;font-size:inherit;color:inherit}
 .legend .lgk:hover{border-color:var(--line);color:var(--ink)}
@@ -433,6 +449,11 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
   <input class="inp" id="pName" maxlength="40">
   <div class="prow"><button class="btn small" id="pDup">복제</button><button class="btn small danger" id="pDel">페이지 삭제</button><span class="spacer"></span><button class="btn small primary" id="pSave">저장</button></div>
 </div>
+<div class="palette" id="pal" hidden role="dialog" aria-label="매니저 검색">
+  <input class="inp" id="palQ" placeholder="매니저 이름으로 찾기 · 다른 페이지 매니저는 참조로 배치" autocomplete="off" spellcheck="false" aria-label="매니저 이름 검색">
+  <ul class="palres" id="palRes" role="listbox"></ul>
+  <div class="palhint"><kbd>↑</kbd><kbd>↓</kbd> 선택 · <kbd>Enter</kbd> 배치 · <kbd>Esc</kbd> 닫기</div>
+</div>
 <div class="pmenu" id="gMenu" hidden role="dialog" aria-label="게임 선택">
   <label>게임</label>
   <div class="glist" id="gList"></div>
@@ -444,7 +465,7 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
     <div class="viewport" id="vp">
       <div class="world" id="world"><svg class="edges" id="edges"></svg></div>
       <div class="tools">
-        <div class="grp"><button class="btn-primary" id="addBtn" title="새 매니저 추가">+ 매니저</button><button id="tidyBtn" title="상위·하위는 그대로 두고 관계선이 덜 꼬이도록 카드를 다시 배치해요 (히스토리로 되돌릴 수 있어요)">자동 정리</button></div>
+        <div class="grp"><button class="btn-primary" id="addBtn" title="새 매니저 추가">+ 매니저</button><button id="tidyBtn" title="상위·하위는 그대로 두고 관계선이 덜 꼬이도록 카드를 다시 배치해요 (히스토리로 되돌릴 수 있어요)">자동 정리</button><button id="palBtn" title="다른 페이지의 매니저를 검색해서 참조로 배치해요 (단축키: Space)">↗ 불러오기</button></div>
         <div class="grp">
           <button id="zOut" aria-label="축소">−</button>
           <span class="zoom" id="zLbl">100%</span>
@@ -474,6 +495,8 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
         <span class="opt"><i class="kd event">E</i>이벤트</span>
         <span class="opt"><i class="kd prop">P</i>프로퍼티</span>
         <span class="opt"><b class="star">★</b>핵심</span>
+        <span class="sep opt"></span>
+        <span class="opt"><kbd>Space</kbd>매니저 검색·배치</span>
       </div>
       <div class="empty" id="empty" hidden>
         <div class="card">
@@ -564,7 +587,7 @@ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 const uid=p=>p+Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const shortName=sig=>String(sig||'').split(/[\s(:<]/)[0]||sig;
 
-const S={managers:new Map(),links:new Map(),db:null,user:null,me:null,canWrite:true,loaded:false,saving:false,
+const S={managers:new Map(),rawM:new Map(),links:new Map(),db:null,user:null,me:null,canWrite:true,loaded:false,saving:false,
   sel:null,draft:null,dirty:false,stale:false,listQ:'',view:'map',
   fnOpen:null,fnQ:'',grpClosed:new Set(),paste:null,
   tq:'',tkind:'',tacc:'',tunused:false,tsort:{key:'mgr',dir:1}};
@@ -604,7 +627,8 @@ function stable(v){if(Array.isArray(v))return'['+v.map(stable).join(',')+']';
   if(v&&typeof v==='object')return'{'+Object.keys(v).filter(k=>!STAMPS.has(k)&&v[k]!==undefined).sort().map(k=>JSON.stringify(k)+':'+stable(v[k])).join(',')+'}';
   return JSON.stringify(v??null);}
 function same(x,y){return(x==null&&y==null)||(x!=null&&y!=null&&stable(x)===stable(y));}
-function curDoc(c,id){const v=(c==='m'?S.managers:S.links).get(id);if(!v)return null;const {id:_,...rest}=v;return plain(rest);}
+// managers come from S.rawM (the stored doc), so a reference card records its own fields, not its source's
+function curDoc(c,id){const v=(c==='m'?S.rawM:S.links).get(id);if(!v)return null;const {id:_,...rest}=v;return plain(rest);}
 // call right before each write; the first call per doc captures its value before the edit
 function note(c,id,after){if(!TX)return;const k=c+'/'+id;
   if(!TX.changes.has(k))TX.changes.set(k,{c,id,b:curDoc(c,id),a:null});
@@ -1052,10 +1076,11 @@ function nodeHTML(m,L,isExp,nk,isCol,rc){
   const cat=esc(CATL[m.category]||'System');
   const sub=nk?`<button class="n-sub" data-sub aria-expanded="${!isCol}">${isCol?'▸':'▾'} 하위 ${nk}${isCol?' · 펼치기':''}</button>`:'';
   const relc=rc?`<span class="n-rel" title="호출·참조·이벤트 관계 ${rc}개">⇄ ${rc}</span>`:'';
-  if(L==='far'&&!isExp) return `<div class="n-body"><div class="n-head"><span>${cat}</span><span class="n-hr">${relc}</span></div><div class="n-name">${esc(m.name)}</div></div>${sub}`;
+  const refl=m.ref?`<div class="n-refl${m.refState==='missing'?' miss':''}" title="다른 페이지의 매니저를 참조하는 카드">↗ ${esc(m.refFrom||'다른 페이지')}${m.refState==='missing'?' · 원본 없음':''}</div>`:'';
+  if(L==='far'&&!isExp) return `<div class="n-body"><div class="n-head"><span>${cat}</span><span class="n-hr">${relc}</span></div><div class="n-name">${esc(m.name)}</div>${refl}</div>${sub}`;
   const pub=fns.filter(f=>f.access==='public');const internalN=fns.length-pub.length;
   const tog=fns.length?`<button class="n-tog" data-tog aria-label="${isExp?'함수 요약 보기':'함수 전체 보기'}">${isExp?'함수 접기':'함수 전체'}</button>`:'';
-  const head=`<div class="n-head"><span>${cat}</span><span class="n-hr">${relc}${tog}</span></div><div class="n-name">${esc(m.name)}</div>${m.desc?`<div class="n-desc">${esc(m.desc)}</div>`:''}`;
+  const head=`<div class="n-head"><span>${cat}</span><span class="n-hr">${relc}${tog}</span></div><div class="n-name">${esc(m.name)}</div>${refl}${m.desc?`<div class="n-desc">${esc(m.desc)}</div>`:''}`;
   if(S.starOnly&&!isExp){const st=fns.filter(f=>f.star);
     return `<div class="n-body">${head}<div class="n-count">${st.length?`<span><b>★ ${st.length}</b> 핵심</span><span>전체 ${fns.length}</span>`:'<span>핵심 함수 없음</span>'}</div>${st.length?`<ul class="n-fns">${st.map(f=>fnLi(m,f)).join('')}</ul>`:''}</div>${sub}`;}
   const cnt=`<div class="n-count">${c.method?`<span><b>${c.method}</b> 메서드</span>`:''}${c.event?`<span><b>${c.event}</b> 이벤트</span>`:''}${c.prop?`<span><b>${c.prop}</b> 프로퍼티</span>`:''}${!fns.length?'<span>함수 없음</span>':''}</div>`;
@@ -1085,9 +1110,10 @@ function renderNodes(){
       world.appendChild(el);nodeEls.set(m.id,el);attachDrag(el);}
     const isExp=expanded.has(m.id),nk=(TREE.C.get(m.id)||[]).length,isCol=collapsed.has(m.id),rc=relCount(m.id);
     const u=m.functions.map(f=>usedOf(m.id,f.id)).join(',');
-    const sig=JSON.stringify([m.name,m.category,m.desc,m.functions,L,S.starOnly,isExp,u,nk,isCol,rc]);
+    const sig=JSON.stringify([m.name,m.category,m.desc,m.functions,L,S.starOnly,isExp,u,nk,isCol,rc,m.refFrom||'',m.refState||'']);
     if(el._sig!==sig){el._sig=sig;el.innerHTML=nodeHTML(m,L,isExp,nk,isCol,rc);el.setAttribute('aria-label',m.name);}
     el.dataset.cat=CATL[m.category]?m.category:'system';
+    el.classList.toggle('ref',!!m.ref);
     el.classList.toggle('lod-far',L==='far'&&!isExp);
     el.hidden=isHidden(m.id);
     el.classList.toggle('selected',S.sel===m.id);
@@ -1333,6 +1359,33 @@ const boardsPath=gid=>gid==='main'?'boards':`games/${gid}/boards`;
 const cpathFor=(bid,kind,gid=S.game)=>gid==='main'&&bid==='main'?kind:`${boardsPath(gid)}/${bid}/${kind}`;
 const cpath=kind=>cpathFor(S.board,kind);
 const bdoc=(bid,gid=S.game)=>S.db.doc(boardsPath(gid)+'/'+bid);
+/* ---------- reference cards: a card that shows a manager living on another page ---------- */
+// The local doc keeps {ref:{g,b,id}, refFrom, cached name/category, parent, px/py}; name, category, desc and
+// functions are read live from the source doc, so the card follows edits made on the source page.
+const refKey=r=>`${r.g}|${r.b}|${r.id}`;
+const refSrc=new Map(),refUnsubs=new Map();
+function mergeRef(d){if(!d.ref)return d;const src=refSrc.get(refKey(d.ref));
+  if(src===undefined)return{...d,refState:'loading'};
+  if(src===null)return{...d,refState:'missing'};
+  return{...d,name:src.name||d.name,category:src.category||d.category,desc:src.desc||'',functions:src.functions||[],refState:'ok'};}
+function rebuildManagers(){S.managers=new Map([...S.rawM].map(([id,d])=>[id,normM(id,mergeRef(d))]));}
+function syncRefs(){
+  const want=new Set([...S.rawM.values()].filter(d=>d.ref).map(d=>refKey(d.ref)));
+  for(const [k,u] of refUnsubs)if(!want.has(k)){u();refUnsubs.delete(k);refSrc.delete(k);}
+  for(const k of want)if(!refUnsubs.has(k)){const [g,b,id]=k.split('|');
+    const done=v=>{refSrc.set(k,v);rebuildManagers();refresh();};
+    refUnsubs.set(k,S.db.doc(cpathFor(b,'managers',g)+'/'+id).onSnapshot(s=>done(s.exists?s.data():null),e=>{console.error(e);done(null);}));}
+}
+function stopRefs(){refUnsubs.forEach(u=>u());refUnsubs.clear();refSrc.clear();}
+function openRefSource(r){
+  if(S.dirty&&!confirmLeave())return;
+  S.dirty=false;
+  if(r.g!==S.game)switchGame(r.g,true,r.b);else if(r.b!==S.board)switchBoard(r.b,true);
+  // the source page loads asynchronously; select the card once it shows up
+  const t0=Date.now();const tick=()=>{if(S.loaded&&S.managers.has(r.id)){select(r.id);centerOn(r.id);return;}
+    if(Date.now()-t0<6000)setTimeout(tick,100);else toast('원본 매니저를 찾지 못했어요. 삭제됐을 수 있어요');};tick();
+}
+
 // every doc stored under one page; history is optional so a missing history rule never blocks a delete
 function pageSnaps(bid,gid){return Promise.all(['managers','links','history'].map(k=>{
   const q=S.db.collection(cpathFor(bid,k,gid)).get();return k==='history'?q.catch(()=>({docs:[]})):q;}));}
@@ -1431,11 +1484,12 @@ function startBoards(){
 function stopBoards(){boardUnsubs.forEach(f=>f());boardUnsubs=[];if(boardListUnsub){boardListUnsub();boardListUnsub=null;}}
 function subscribeBoard(){
   boardUnsubs.forEach(f=>f());boardUnsubs=[];
-  S.managers=new Map();S.links=new Map();S.loaded=false;S.sel=null;S.draft=null;S.dirty=false;S.fnOpen=null;didFit=false;
+  S.managers=new Map();S.rawM=new Map();S.links=new Map();S.loaded=false;S.sel=null;S.draft=null;S.dirty=false;S.fnOpen=null;didFit=false;
   nodeEls.forEach(el=>el.remove());nodeEls.clear();
   let gotM=false,gotL=false;const b=S.board,g=S.game;
+  boardUnsubs.push(stopRefs);
   boardUnsubs.push(S.db.collection(cpath('managers')).onSnapshot(snap=>{if(b!==S.board||g!==S.game)return;
-    S.managers=new Map(snap.docs.map(d=>[d.id,normM(d.id,d.data())]));gotM=true;if(gotM&&gotL)S.loaded=true;refresh();},onSubErr));
+    S.rawM=new Map(snap.docs.map(d=>[d.id,d.data()]));syncRefs();rebuildManagers();gotM=true;if(gotM&&gotL)S.loaded=true;refresh();},onSubErr));
   boardUnsubs.push(S.db.collection(cpath('links')).onSnapshot(snap=>{if(b!==S.board||g!==S.game)return;
     S.links=new Map(snap.docs.map(d=>[d.id,{id:d.id,...d.data()}]));gotL=true;if(gotM&&gotL)S.loaded=true;refresh();},onSubErr));
   // history failures stay inside the history box; editing keeps working without the history rules
@@ -1499,7 +1553,7 @@ $('#pDup').onclick=async()=>{
   try{
     await bdoc(id,g).set({name,order:Date.now(),createdAt:Date.now()});
     const tasks=[];
-    for(const m of S.managers.values()){const {id:mid,...rest}=m;tasks.push(()=>S.db.doc(cpathFor(id,'managers',g)+'/'+mid).set(plain(rest)));}
+    for(const [mid,rest] of S.rawM)tasks.push(()=>S.db.doc(cpathFor(id,'managers',g)+'/'+mid).set(plain(rest)));
     for(const l of S.links.values()){const {id:lid,...rest}=l;tasks.push(()=>S.db.doc(cpathFor(id,'links',g)+'/'+lid).set(plain(rest)));}
     await runAll(tasks);switchBoard(id,true);toast(`"${name}"을 만들었어요`);
   }catch(e){fail(e);}
@@ -1576,11 +1630,13 @@ function markdown(){
   return md;
 }
 function pageJSON(){return{version:2,kind:'page',project:$('#projTitle').value||'',exportedAt:new Date().toISOString(),
-  page:{id:S.board,name:boardName(curBoard())},managers:[...S.managers.values()].map(plain),links:[...S.links.values()].map(plain)};}
+  page:{id:S.board,name:boardName(curBoard())},managers:rawManagers(),links:[...S.links.values()].map(plain)};}
+// stored docs (a reference card keeps only its link, not its source's content)
+const rawManagers=()=>[...S.rawM].map(([id,d])=>({id,...plain(d)}));
 async function allJSON(){
   const pages=[],g=S.game;
   for(const b of (S.boards.length?S.boards:[{id:'main'}])){
-    if(b.id===S.board&&g===S.game){pages.push({id:b.id,name:boardName(b),managers:[...S.managers.values()].map(plain),links:[...S.links.values()].map(plain)});continue;}
+    if(b.id===S.board&&g===S.game){pages.push({id:b.id,name:boardName(b),managers:rawManagers(),links:[...S.links.values()].map(plain)});continue;}
     const [ms,ls]=await Promise.all([S.db.collection(cpathFor(b.id,'managers',g)).get(),S.db.collection(cpathFor(b.id,'links',g)).get()]);
     pages.push({id:b.id,name:boardName(b),managers:ms.docs.map(d=>({id:d.id,...d.data()})),links:ls.docs.map(d=>({id:d.id,...d.data()}))});}
   return{version:2,kind:'all',project:$('#projTitle').value||'',exportedAt:new Date().toISOString(),pages};
@@ -1816,7 +1872,9 @@ function groupNames(){const s=new Set();for(const m of S.managers.values())m.fun
   if(S.draft)S.draft.functions.forEach(f=>f.group&&s.add(f.group));return[...s].sort();}
 
 function renderEditor(){
-  const m=S.managers.get(S.sel),d=S.draft,ro=!S.canWrite,dis=ro?' disabled':'';
+  const m=S.managers.get(S.sel),d=S.draft,ro=!S.canWrite;
+  // a reference card's content lives on its source page; here only its place, parent and relations change
+  const isRef=!!m.ref,lockC=ro||isRef,dis=lockC?' disabled':'';
   $('#grpList').innerHTML=groupNames().map(g=>`<option value="${esc(g)}">`).join('');
   const others=[...S.managers.values()].filter(o=>o.id!==m.id).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   const out=[...S.links.values()].filter(l=>l.from===m.id),inc=[...S.links.values()].filter(l=>l.to===m.id);
@@ -1851,7 +1909,7 @@ function renderEditor(){
         <div class="uses">${users.length?'사용처: '+users.map(l=>`<button data-go="${esc(l.from)}">${esc(nm(l.from))}</button> <span class="chip k-${l.kind}">${KINDS[l.kind]?.label||''}</span>`).join(' · '):'이 함수를 쓰는 관계가 아직 없어요.'}</div>
         <div class="row">
           <button class="btn small" id="fe-close">닫기</button>
-          ${ro?'':`<button class="icon-btn" id="fe-up" aria-label="위로" title="위로"${i===0?' disabled':''}>↑</button>
+          ${lockC?'':`<button class="icon-btn" id="fe-up" aria-label="위로" title="위로"${i===0?' disabled':''}>↑</button>
           <button class="icon-btn" id="fe-down" aria-label="아래로" title="아래로"${i===d.functions.length-1?' disabled':''}>↓</button>
           <span class="spacer"></span><button class="btn small danger" id="fe-del">함수 삭제</button>`}
         </div></div>`;
@@ -1879,18 +1937,20 @@ function renderEditor(){
   panel.innerHTML=`
     <div class="backrow"><button class="link-btn" id="back">← 전체 목록</button><span class="edited" id="edited"></span></div>
     ${ro?'<div class="ro-note">보기 전용으로 열려 있어요.</div>':''}
+    ${isRef?`<div class="refnote"><span>↗ <b>${esc(m.refFrom||'다른 페이지')}</b>의 매니저를 참조하는 카드예요. ${m.refState==='missing'?'원본이 삭제됐어요.':'이름·함수는 원본 페이지에서 고쳐요.'}</span>${m.refState==='missing'?'':'<button class="btn small" id="openSrc">원본 열기</button>'}</div>`:''}
     ${S.stale?`<div class="stale"><span>다른 팀원이 이 매니저를 방금 수정했어요.</span><button class="btn small" id="reload">최신 내용 보기</button></div>`:''}
     <div class="field"><label for="f-name">매니저 이름</label><input class="inp mono" id="f-name" value="${esc(d.name)}" maxlength="60"${dis}></div>
     <div class="field"><span class="flabel">분류</span><div class="cats" role="group" aria-label="분류">${CATS.map(([k,l])=>`<button type="button" data-cat="${k}" data-setcat="${k}" aria-pressed="${d.category===k}"${dis}><i></i>${l}</button>`).join('')}</div></div>
-    <div class="field"><label for="f-parent">상위 매니저</label><select class="inp" id="f-parent"${dis}><option value="">없음 (최상위·독립)</option>${popts.join('')}</select>
+    <div class="field"><label for="f-parent">상위 매니저</label><select class="inp" id="f-parent"${ro?' disabled':''}><option value="">없음 (최상위·독립)</option>${popts.join('')}</select>
       <div class="kids"><span>하위:</span>${kids.map(k=>`<button class="link-btn" data-go="${esc(k)}">${esc(nm(k))}</button>`).join('<span>·</span>')||'<span>없음</span>'}${ro?'':'<button class="btn small" id="addChild">+ 하위 매니저</button>'}</div></div>
     <div class="field"><label for="f-desc">역할 설명</label><textarea class="inp" id="f-desc" rows="2" maxlength="400" placeholder="이 매니저가 맡는 일"${dis}>${esc(d.desc)}</textarea></div>
     <h3>함수 <span>메서드 ${c.method} · 이벤트 ${c.event} · 프로퍼티 ${c.prop}</span></h3>
     <div class="fnbar"><input class="search" id="fnQ" placeholder="함수 검색" value="${esc(S.fnQ)}" aria-label="함수 검색">
-      ${ro?'':`<button class="btn small" id="addFn">+ 함수</button><button class="btn small" id="pasteBtn"${P?' disabled':''}>코드 붙여넣기</button>`}</div>
+      ${lockC?'':`<button class="btn small" id="addFn">+ 함수</button><button class="btn small" id="pasteBtn"${P?' disabled':''}>코드 붙여넣기</button>`}</div>
     ${pasteHTML}
     <div id="fns">${d.functions.length?(fnHTML||'<p class="hint">검색 결과가 없어요.</p>'):'<p class="hint">등록된 함수가 없어요. <b>코드 붙여넣기</b>로 한 번에 가져올 수 있어요.</p>'}</div>
-    ${ro?'':`<div class="actions"><button class="btn primary" id="save"${S.dirty?'':' disabled'}>${S.dirty?'저장':'저장됨'}</button><button class="btn" id="revert"${S.dirty?'':' disabled'}>되돌리기</button><span class="spacer"></span><button class="btn danger" id="del">매니저 삭제</button></div>`}
+    ${ro?'':isRef?'<div class="actions"><span class="spacer"></span><button class="btn danger" id="del">참조 카드 삭제</button></div>'
+      :`<div class="actions"><button class="btn primary" id="save"${S.dirty?'':' disabled'}>${S.dirty?'저장':'저장됨'}</button><button class="btn" id="revert"${S.dirty?'':' disabled'}>되돌리기</button><span class="spacer"></span><button class="btn danger" id="del">매니저 삭제</button></div>`}
     <h3>관계 <span>${out.length+inc.length}개</span></h3>
     ${out.length+inc.length?`<ul class="rels">${out.map(l=>relRow(l,'out')).join('')}${inc.map(l=>relRow(l,'in')).join('')}</ul>`:'<p class="hint">연결된 매니저가 없어요.</p>'}
     ${ro?'':(others.length?`<div class="addrel">
@@ -1913,7 +1973,7 @@ function renderEditor(){
   const mark=()=>{if(!S.dirty){S.dirty=true;const s=$('#save');if(s){s.textContent='저장';s.disabled=false;}const r=$('#revert');if(r)r.disabled=false;}};
   // open function editor bindings
   const fe=panel.querySelector('.fedit');
-  if(fe&&!ro){
+  if(fe&&!lockC){
     const i=+fe.dataset.fi,f=d.functions[i];
     $('#fe-sig').oninput=e=>{f.sig=e.target.value;mark();};
     $('#fe-desc').oninput=e=>{f.desc=e.target.value;mark();};
@@ -1930,10 +1990,22 @@ function renderEditor(){
   }
   if(ro)return;
 
+  $('#addChild').onclick=()=>addManager(m.id);
+  const del=$('#del'),delLabel=del.textContent;del.onclick=async()=>{
+    if(!del.classList.contains('armed')){del.classList.add('armed');del.textContent='한 번 더 누르면 삭제';setTimeout(()=>{if(del.isConnected){del.classList.remove('armed');del.textContent=delLabel;}},3000);return;}
+    const id=S.sel,name=m.name;S.dirty=false;S.sel=null;S.draft=null;
+    try{await withHistory(`${isRef?'참조 카드 ':''}${name} 삭제`,()=>delManager(id));toast(isRef?'참조 카드를 삭제했어요. 원본은 그대로예요':'매니저를 삭제했어요');}catch(e){fail(e);}renderAll();};
+  panel.querySelectorAll('[data-dellink]').forEach(b=>b.onclick=async()=>{const l=S.links.get(b.dataset.dellink);
+    try{await withHistory(l?'관계 삭제: '+linkLabel(l):'관계 삭제',()=>delLink(b.dataset.dellink));}catch(e){fail(e);}});
+  bindAddRel(m);
+  if(isRef){
+    if($('#openSrc'))$('#openSrc').onclick=()=>openRefSource(m.ref);
+    $('#f-parent').onchange=e=>setParent(m.id,e.target.value,FREE&&e.target.value?slotUnder(e.target.value,m.id):null);
+    return;}
+
   $('#f-name').oninput=e=>{d.name=e.target.value;mark();};
   $('#f-desc').oninput=e=>{d.desc=e.target.value;mark();};
   $('#f-parent').onchange=e=>{d.parent=e.target.value;mark();};
-  $('#addChild').onclick=()=>addManager(m.id);
   panel.querySelectorAll('[data-setcat]').forEach(b=>b.onclick=()=>{d.category=b.dataset.setcat;
     panel.querySelectorAll('[data-setcat]').forEach(x=>x.setAttribute('aria-pressed',x===b));mark();});
   $('#addFn').onclick=()=>{const f={id:uid('f'),sig:'',desc:'',kind:'method',access:'public',group:'',star:false};d.functions.push(f);
@@ -1955,14 +2027,9 @@ function renderEditor(){
   panel.addEventListener('keydown',onEditorKey);
   $('#save').onclick=doSave;
   $('#revert').onclick=()=>{S.draft=clone(S.managers.get(S.sel));S.dirty=false;S.stale=false;S.fnOpen=null;renderEditor();};
-  const del=$('#del');del.onclick=async()=>{
-    if(!del.classList.contains('armed')){del.classList.add('armed');del.textContent='한 번 더 누르면 삭제';setTimeout(()=>{if(del.isConnected){del.classList.remove('armed');del.textContent='매니저 삭제';}},3000);return;}
-    const id=S.sel,name=m.name;S.dirty=false;S.sel=null;S.draft=null;
-    try{await withHistory(`${name} 삭제`,()=>delManager(id));toast('매니저를 삭제했어요');}catch(e){fail(e);}renderAll();};
-  panel.querySelectorAll('[data-dellink]').forEach(b=>b.onclick=async()=>{const l=S.links.get(b.dataset.dellink);
-    try{await withHistory(l?'관계 삭제: '+linkLabel(l):'관계 삭제',()=>delLink(b.dataset.dellink));}catch(e){fail(e);}});
-
-  // add relation: function picker follows target + direction
+}
+// add relation: function picker follows target + direction
+function bindAddRel(m){
   const rTo=$('#r-to'),rDir=$('#r-dir'),rFn=$('#r-fn'),rKind=$('#r-kind');
   if(rTo){
     const fill=()=>{
@@ -2115,6 +2182,98 @@ async function addManager(parentId,opt){
 function uniqueName(b){const ns=new Set([...S.managers.values()].map(m=>m.name));if(!ns.has(b))return b;let i=2;while(ns.has(b+i))i++;return b+i;}
 $('#addBtn').onclick=()=>addManager('');$('#emptyAdd').onclick=()=>addManager('');
 
+/* ---------- Space palette: find a manager anywhere and place it on this page ---------- */
+// index of managers on every other page (all games), read on demand and kept for a minute
+let XI={at:0,items:[]},xiLoad=null;
+function crossIndex(){
+  if(Date.now()-XI.at<60000)return Promise.resolve(XI.items);
+  if(xiLoad)return xiLoad;
+  xiLoad=(async()=>{const items=[];
+    const games=[...S.games].sort((a,b)=>(b.id===S.game)-(a.id===S.game));
+    for(const g of games){let boards=[];
+      if(g.id===S.game)boards=S.boards.length?S.boards:[{id:'main'}];
+      else{try{boards=(await S.db.collection(boardsPath(g.id)).get()).docs.map(d=>({id:d.id,...d.data()}));}catch(e){}
+        if(!boards.some(b=>b.id==='main'))boards.push({id:'main'});}
+      await Promise.all(boards.filter(bd=>!(g.id===S.game&&bd.id===S.board)).map(async bd=>{
+        try{(await S.db.collection(cpathFor(bd.id,'managers',g.id)).get()).docs.forEach(d=>{const v=d.data();if(v.ref)return;
+          items.push({g:g.id,b:bd.id,id:d.id,name:v.name||'',category:v.category||'system',fns:(v.functions||[]).length,
+            where:`${gameName(g)} · ${boardName(bd)}`,same:g.id===S.game});});}catch(e){}}));}
+    XI={at:Date.now(),items};return items;})();
+  return xiLoad.finally(()=>{xiLoad=null;});
+}
+const pal={at:null,sel:0,items:[]};let lastWorld=null;
+vp.addEventListener('pointermove',e=>{const r=vp.getBoundingClientRect();lastWorld={cx:e.clientX,cy:e.clientY,x:(e.clientX-r.left-T.x)/T.k,y:(e.clientY-r.top-T.y)/T.k};});
+vp.addEventListener('pointerleave',()=>{lastWorld=null;});
+function palResults(raw){
+  const q=raw.trim().toLowerCase();
+  const score=n=>{n=String(n||'').toLowerCase();return !q?1:n.startsWith(q)?3:n.includes(q)?2:0;};
+  const here=[...S.managers.values()].filter(m=>score(m.name)).sort((a,b)=>score(b.name)-score(a.name)||a.name.localeCompare(b.name)).slice(0,8)
+    .map(m=>({type:'here',id:m.id,name:m.name,sub:m.ref?`이 페이지 · ↗ ${m.refFrom||'참조'}`:'이 페이지'}));
+  const placed=new Set([...S.rawM.values()].filter(d=>d.ref).map(d=>refKey(d.ref)));
+  const other=XI.items.filter(it=>score(it.name)&&!placed.has(refKey(it)))
+    .sort((a,b)=>score(b.name)-score(a.name)||(b.same-a.same)||a.name.localeCompare(b.name)).slice(0,30)
+    .map(it=>({type:'ref',it,name:it.name,sub:`${it.where} · 함수 ${it.fns}개`}));
+  const out=[];
+  if(here.length)out.push({group:'이 페이지에 있음 · 누르면 이동'},...here);
+  if(other.length)out.push({group:'다른 페이지 · 누르면 참조 카드로 배치'},...other);
+  if(q)out.push({group:''},{type:'new',name:raw.trim(),sub:'이 페이지에 새 매니저로 만들기'});
+  return out;
+}
+function renderPal(){
+  pal.items=palResults($('#palQ').value);const acts=pal.items.filter(x=>x.type);
+  pal.sel=Math.max(0,Math.min(pal.sel,acts.length-1));let k=-1;
+  $('#palRes').innerHTML=pal.items.map(x=>{if(!x.type)return x.group?`<li class="pg">${esc(x.group)}</li>`:'';k++;
+      return`<li><button data-k="${k}" class="${k===pal.sel?'on':''}" role="option" aria-selected="${k===pal.sel}"><b>${x.type==='new'?'+ ':''}${esc(x.name)}</b><small>${esc(x.sub)}</small></button></li>`;}).join('')
+    +(xiLoad?'<li class="pg">다른 페이지를 불러오는 중…</li>':!acts.length?'<li class="pg">찾는 매니저가 없어요</li>':'');
+  $('#palRes').querySelectorAll('[data-k]').forEach(b=>b.onclick=()=>palPick(+b.dataset.k));
+  const on=$('#palRes .on');if(on)on.scrollIntoView({block:'nearest'});
+}
+function openPalette(at){
+  if(!S.db||!S.canWrite)return;
+  if(S.view!=='map')setView('map');
+  const r=vp.getBoundingClientRect(),c=viewCenter();
+  const p=at||{cx:r.left+r.width/2-190,cy:r.top+r.height/4,x:c.x+NW/2,y:c.y+20};
+  pal.at={x:p.x,y:p.y};pal.sel=0;
+  const el=$('#pal');el.hidden=false;
+  el.style.left=Math.max(12,Math.min(p.cx,innerWidth-392))+'px';el.style.top=Math.max(12,Math.min(p.cy,innerHeight-320))+'px';
+  const qi=$('#palQ');qi.value='';renderPal();qi.focus();
+  crossIndex().then(()=>{if(!$('#pal').hidden)renderPal();});
+}
+function closePalette(){$('#pal').hidden=true;}
+async function palPick(k){
+  const x=pal.items.filter(i=>i.type)[k];if(!x)return;
+  // cards are placed with their top edge just under the cursor
+  const at=pal.at&&{x:pal.at.x-NW/2,y:pal.at.y-20};closePalette();
+  if(x.type==='here'){select(x.id);centerOn(x.id);return;}
+  if(x.type==='new'){addManager('',{name:x.name,at});return;}
+  placeRef(x.it,at);
+}
+async function placeRef(it,at){
+  if(S.dirty&&!confirmLeave())return;
+  const id=uid('m'),free=freeMode(),p=free?(at||viewCenter()):null;
+  const body={ref:{g:it.g,b:it.b,id:it.id},refFrom:it.where,name:it.name,category:it.category,desc:'',functions:[],parent:'',x:0,y:0,
+    ...(p?{px:Math.round(p.x),py:Math.round(p.y)}:{}),updatedAt:Date.now(),...by()};
+  try{await withHistory(`참조 추가: ${it.name} (${it.where})`,async()=>{note('m',id,body);await mref(id).set(body);});
+    toast(`${it.name}을(를) 참조 카드로 놓았어요. 원본이 바뀌면 같이 바뀌어요`);
+    setTimeout(()=>{if(S.managers.has(id)){select(id);centerOn(id);}},150);
+  }catch(e){fail(e);}
+}
+$('#palBtn').onclick=()=>openPalette(null);
+$('#palQ').oninput=()=>{pal.sel=0;renderPal();};
+$('#palQ').onkeydown=e=>{const n=pal.items.filter(i=>i.type).length;
+  if(e.key==='ArrowDown'){e.preventDefault();pal.sel=(pal.sel+1)%Math.max(1,n);renderPal();}
+  else if(e.key==='ArrowUp'){e.preventDefault();pal.sel=(pal.sel-1+Math.max(1,n))%Math.max(1,n);renderPal();}
+  else if(e.key==='Enter'){e.preventDefault();palPick(pal.sel);}
+  else if(e.key==='Escape'){e.preventDefault();closePalette();}};
+document.addEventListener('pointerdown',e=>{if(!$('#pal').hidden&&!e.target.closest('#pal,#palBtn'))closePalette();});
+// Space opens the palette at the cursor, unless the user is typing or a dialog is open
+document.addEventListener('keydown',e=>{
+  if(e.key!==' '||e.repeat||e.ctrlKey||e.metaKey||e.altKey)return;
+  const t=e.target;if(t.closest&&t.closest('input,textarea,select,[contenteditable="true"]'))return;
+  if(t.closest&&t.closest('button')&&!t.closest('#vp'))return; // keep Space for buttons outside the canvas
+  if(S.view!=='map'||!S.db||!S.canWrite||!$('#pal').hidden||!$('#xModal').hidden||!$('#teamModal').hidden)return;
+  e.preventDefault();openPalette(lastWorld);});
+
 $('#loadSample').onclick=async()=>{
   if(!S.canWrite){toast('보기 전용이라 불러올 수 없어요');return;}
   const btn=$('#loadSample');btn.disabled=true;btn.textContent='불러오는 중…';
@@ -2181,7 +2340,7 @@ function refresh(){
 }
 function renderAll(){
   renderTabs();
-  pt.disabled=!S.canWrite;$('#addBtn').hidden=!S.canWrite;$('#tidyBtn').hidden=!S.canWrite;
+  pt.disabled=!S.canWrite;$('#addBtn').hidden=!S.canWrite;$('#tidyBtn').hidden=!S.canWrite;$('#palBtn').hidden=!S.canWrite;
   $('#empty').hidden=!(S.loaded&&S.managers.size===0);
   if(!S.canWrite){$('#emptyAdd').hidden=true;$('#loadSample').hidden=true;}
   renderNodes();scheduleEdges();if(S.view==='table')renderTable();
