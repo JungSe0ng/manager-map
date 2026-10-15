@@ -444,7 +444,7 @@ body{margin:0;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-a
     <div class="viewport" id="vp">
       <div class="world" id="world"><svg class="edges" id="edges"></svg></div>
       <div class="tools">
-        <div class="grp"><button class="btn-primary" id="addBtn" title="새 매니저 추가">+ 매니저</button></div>
+        <div class="grp"><button class="btn-primary" id="addBtn" title="새 매니저 추가">+ 매니저</button><button id="tidyBtn" title="상위·하위는 그대로 두고 관계선이 덜 꼬이도록 카드를 다시 배치해요 (히스토리로 되돌릴 수 있어요)">자동 정리</button></div>
         <div class="grp">
           <button id="zOut" aria-label="축소">−</button>
           <span class="zoom" id="zLbl">100%</span>
@@ -1103,9 +1103,9 @@ const pos=new Map();let MODE=new Map();let laneEl=null;
 let edgeRaf=0;
 function scheduleEdges(){if(edgeRaf)return;edgeRaf=requestAnimationFrame(()=>{edgeRaf=0;layout();});}
 function computeLayout(H,opt){
-  const kids=opt.kids,P=new Map(),M=new Map();
-  const trees=TREE.roots.filter(r=>(TREE.C.get(r)||[]).length);
-  const lone=TREE.roots.filter(r=>!(TREE.C.get(r)||[]).length);
+  const kids=opt.kids,P=new Map(),M=new Map(),roots=opt.roots||TREE.roots;
+  const trees=roots.filter(r=>(TREE.C.get(r)||[]).length);
+  const lone=roots.filter(r=>!(TREE.C.get(r)||[]).length);
   const stacked=new Set(),levelH=[];
   const pass=(id,d)=>{const ks=kids(id);
     const m=!ks.length?'leaf':(ks.length>=(opt.stackMin||STACK_MIN)&&ks.every(k=>!kids(k).length))?'stack':'row';
@@ -1154,12 +1154,17 @@ function computeFreeLayout(H,opt){
     else{P.set(id,{x:rowX,y:rowY,h:H(id)});rowX+=NW+HG;}}
   return{pos:P,MODE:new Map(),lane:{show:false,top:0,width:0,count:0},free:true};
 }
-// free layout hierarchy lines: a shared bus when every child sits below the parent, else one elbow per child
+// free layout hierarchy lines: a left rail for children stacked in one column (like the auto stack),
+// a shared bus when every child sits below the parent, else one elbow per child
 function freeTreePaths(P,kids){
   const out=[];
   for(const [id,p] of P){const ks=kids(id).filter(k=>P.has(k));if(!ks.length)continue;
-    const px=p.x+NW/2,py=p.y+p.h;let d='';
-    if(ks.every(k=>P.get(k).y>py+12)){
+    const px=p.x+NW/2,py=p.y+p.h;let d='';const xs=ks.map(k=>P.get(k).x);
+    if(ks.length>1&&Math.max(...xs)-Math.min(...xs)<2&&ks.every(k=>P.get(k).y>py)){
+      const sx=xs[0]-IND/2,top=py+8;let last=top,stubs='';
+      for(const k of ks){const q=P.get(k),sy=q.y+Math.min(22,q.h/2);stubs+=`M${sx},${sy}H${q.x}`;last=Math.max(last,sy);}
+      d=(sx>=p.x&&sx<=p.x+NW?`M${sx},${py}V${last}`:`M${px},${py}V${top}H${sx}V${last}`)+stubs;}
+    else if(ks.every(k=>P.get(k).y>py+12)){
       const by=Math.max(py+12,Math.min(...ks.map(k=>P.get(k).y))-VG/2);d=`M${px},${py}V${by}`;
       const xs=ks.map(k=>P.get(k).x+NW/2),mn=Math.min(px,...xs),mx=Math.max(px,...xs);
       if(mx-mn>0.5)d+=`M${mn},${by}H${mx}`;ks.forEach(k=>{const q=P.get(k);d+=`M${q.x+NW/2},${by}V${q.y}`;});}
@@ -1167,6 +1172,49 @@ function freeTreePaths(P,kids){
     out.push({id,ks,d});}
   return out;
 }
+// "자동 정리": the org-chart layout, but with siblings and roots reordered so relation wires cross less.
+// One group at a time is sorted by the mean position of what its subtree is wired to (barycenter heuristic:
+// x for side-by-side groups, y for stacked children); a new order is kept only if it lowers the crossing count,
+// which stops mutually-wired groups from flipping back and forth.
+function tidyLayout(H){
+  buildTree();
+  const C=new Map([...TREE.C].map(([k,v])=>[k,[...v]])),roots=[...TREE.roots],kids=id=>C.get(id)||[];
+  const wires=[],nb=new Map();const add=(a,b)=>{if(!nb.has(a))nb.set(a,[]);nb.get(a).push(b);};
+  for(const l of S.links.values())if(l.from!==l.to&&!isTreeLink(l)&&S.managers.has(l.from)&&S.managers.has(l.to)){wires.push([l.from,l.to]);add(l.from,l.to);add(l.to,l.from);}
+  const subs=new Map();const sub=id=>{if(!subs.has(id))subs.set(id,new Set([id,...kids(id).flatMap(k=>[...sub(k)])]));return subs.get(id);};
+  const run=()=>computeLayout(H,{kids,roots,laneH:0});
+  const at=(R,id,ax)=>{const p=R.pos.get(id);return p?(ax==='x'?p.x+NW/2:p.y+p.h/2):0;};
+  const crossings=R=>{const L=wires.map(([a,b])=>[{x:at(R,a,'x'),y:at(R,a,'y')},{x:at(R,b,'x'),y:at(R,b,'y')}]);
+    const side=(a,b,c)=>(b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x);let n=0;
+    for(let i=0;i<L.length;i++)for(let j=i+1;j<L.length;j++){const [p,q]=L[i],[r,s]=L[j];if(side(p,q,r)*side(p,q,s)<0&&side(r,s,p)*side(r,s,q)<0)n++;}
+    return n;};
+  let R=run(),best=crossings(R);
+  const groups=[...[...C].filter(([,a])=>a.length>1).map(([p,a])=>[p,a]),[null,roots]];
+  for(let pass=0;pass<4&&best>0;pass++)for(const [p,arr] of groups){
+    const ax=p&&R.MODE.get(p)==='stack'?'y':'x',prev=[...arr];
+    const bary=id=>{const inside=sub(id);let s=0,n=0;
+      for(const m of inside)for(const o of nb.get(m)||[])if(!inside.has(o)){s+=at(R,o,ax);n++;}return n?s/n:at(R,id,ax);};
+    const b=new Map(arr.map(id=>[id,bary(id)]));arr.sort((x,y)=>b.get(x)-b.get(y));
+    if(arr.every((id,i)=>id===prev[i]))continue;
+    const R2=run(),c2=crossings(R2);
+    if(c2<best){best=c2;R=R2;}else arr.splice(0,arr.length,...prev);
+  }
+  return R;
+}
+async function tidyUp(){
+  if(!S.canWrite||!S.db||!S.managers.size)return;
+  // hidden (collapsed) cards get the height they would have, so they land correctly when expanded
+  const H=id=>{const el=nodeEls.get(id);return el&&!el.hidden&&el.offsetHeight?el.offsetHeight:cardSpec(S.managers.get(id),viewLod()==='near'?'full':'summary').h;};
+  const R=tidyLayout(H);
+  try{await withHistory('자동 정리',async()=>{const tasks=[];
+      for(const [id,p] of R.pos){const m=S.managers.get(id);const patch={px:Math.round(p.x),py:Math.round(p.y)};
+        if(!m||(m.px===patch.px&&m.py===patch.py))continue;
+        note('m',id,{...curDoc('m',id),...patch});tasks.push(()=>mref(id).update(patch));}
+      await runAll(tasks);});
+    toast('관계선이 덜 꼬이도록 다시 배치했어요');setTimeout(fit,80);
+  }catch(e){fail(e);}
+}
+$('#tidyBtn').onclick=tidyUp;
 let FREE=false;
 function layout(){
   if(S.view!=='map'||vp.hidden)return;
@@ -1200,22 +1248,25 @@ function treePaths(P,M,kids){
     out.push({id,ks,d});}
   return out;
 }
-function boxOf(P,id){const p=P.get(id);if(!p)return null;return{cx:p.x+NW/2,cy:p.y+p.h/2,hw:NW/2+5,hh:p.h/2+5};}
-function clip(b,tx,ty){let dx=tx-b.cx,dy=ty-b.cy;if(!dx&&!dy)dy=1;
-  const t=Math.min(dx?b.hw/Math.abs(dx):1e9,dy?b.hh/Math.abs(dy):1e9);return{x:b.cx+dx*t,y:b.cy+dy*t};}
-function crossGeom(list,P){
+// Blueprint-style wires: leave the source on the side facing the target and enter the target from the other side,
+// with horizontal tangents. Cards stacked above each other get a C-shaped wire on their right edges instead.
+// rowY(l) gives the y of the target function's row inside its card (or null) so the wire lands on that row.
+function wireGeom(list,P,rowY){
   const groups={},out=[];
   for(const l of list){const k=[l.from,l.to].sort().join('|');(groups[k]=groups[k]||[]).push(l);}
-  for(const k in groups){
-    const g=groups[k];const [ia,ib]=k.split('|');const A0=boxOf(P,ia),B0=boxOf(P,ib);if(!A0||!B0)continue;
-    let nx=-(B0.cy-A0.cy),ny=B0.cx-A0.cx;const len=Math.hypot(nx,ny)||1;nx/=len;ny/=len;
+  for(const k in groups){const g=groups[k];
     g.forEach((l,i)=>{
-      const A=boxOf(P,l.from),B=boxOf(P,l.to);
-      const off=(i-(g.length-1)/2)*56+(g.length===1?40:0);
-      const mx=(A.cx+B.cx)/2+nx*off,my=(A.cy+B.cy)/2+ny*off;
-      const s=clip(A,mx,my),e=clip(B,mx,my);
+      const A=P.get(l.from),B=P.get(l.to);if(!A||!B)return;
+      const off=(i-(g.length-1)/2)*12,ry=rowY&&rowY(l);
+      const ay=A.y+Math.min(34,A.h/2)+off,by=ry!=null?B.y+ry:B.y+Math.min(34,B.h/2)+off;
+      const dxc=(B.x+NW/2)-(A.x+NW/2);let s,e,c1,c2;
+      if(Math.abs(dxc)<NW*0.6){const t=46+Math.abs(by-ay)*0.22;
+        s={x:A.x+NW,y:ay};e={x:B.x+NW,y:by};c1={x:s.x+t,y:s.y};c2={x:e.x+t,y:e.y};}
+      else{const dir=dxc>0?1:-1;s={x:dir>0?A.x+NW:A.x,y:ay};e={x:dir>0?B.x:B.x+NW,y:by};
+        const t=Math.max(50,Math.min(240,Math.abs(e.x-s.x)*0.5+Math.abs(e.y-s.y)*0.12));
+        c1={x:s.x+dir*t,y:s.y};c2={x:e.x-dir*t,y:e.y};}
       const kind=KINDS[l.kind]?l.kind:'call';const fn=fnOf(l.to,l.toFn);
-      out.push({l,kind,s,e,mx,my,lx:.25*s.x+.5*mx+.25*e.x,ly:.25*s.y+.5*my+.25*e.y,fn,
+      out.push({l,kind,s,e,c1,c2,lx:(s.x+3*c1.x+3*c2.x+e.x)/8,ly:(s.y+3*c1.y+3*c2.y+e.y)/8,fn,
         text:KINDS[kind].label+(fn?' · '+shortName(fn.sig):'')+(l.note?' · '+l.note:'')});
     });
   }
@@ -1240,9 +1291,13 @@ function renderEdges(){
     return true;});
   const defs=`<defs>${Object.keys(KINDS).map(k=>`<marker id="ar-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,1 L10,5 L0,9 z" style="fill:var(--k-${k})"/></marker>`).join('')}
   <marker id="dm-own" viewBox="0 0 14 10" refX="1" refY="5" markerWidth="12" markerHeight="9" orient="auto-start-reverse"><path d="M1,5 L7,1 L13,5 L7,9 z" style="fill:var(--raise);stroke:var(--k-own);stroke-width:1.5"/></marker></defs>`;
-  const G=crossGeom(show,pos);let paths='';
+  // land on the target function's row when the card is showing it
+  const rowY=l=>{if(!l.toFn)return null;const el=nodeEls.get(l.to);const row=el&&el.querySelector(`[data-fid="${CSS.escape(l.toFn)}"]`);
+    return row&&row.offsetHeight?row.offsetTop+row.offsetHeight/2:null;};
+  const G=wireGeom(show,pos,rowY);let paths='';
+  const f=v=>v.toFixed(1);
   for(const g of G){const l=g.l,kind=g.kind;const dim=S.linkMode==='all'&&S.sel&&l.from!==S.sel&&l.to!==S.sel;g.dim=dim;
-    paths+=`<path data-lid="${esc(l.id)}" class="edge k-${kind}${dim?' dim':''}" d="M${g.s.x.toFixed(1)},${g.s.y.toFixed(1)} Q${g.mx.toFixed(1)},${g.my.toFixed(1)} ${g.e.x.toFixed(1)},${g.e.y.toFixed(1)}" marker-end="url(#ar-${kind})"${kind==='own'?' marker-start="url(#dm-own)"':''}/>`;}
+    paths+=`<path data-lid="${esc(l.id)}" class="edge k-${kind}${dim?' dim':''}" d="M${f(g.s.x)},${f(g.s.y)} C${f(g.c1.x)},${f(g.c1.y)} ${f(g.c2.x)},${f(g.c2.y)} ${f(g.e.x)},${f(g.e.y)}" marker-end="url(#ar-${kind})"${kind==='own'?' marker-start="url(#dm-own)"':''}/>`;}
   svg.innerHTML=defs+tree+paths;
   for(const g of G){const l=g.l,kind=g.kind,fn=g.fn;
     const lb=document.createElement('div');lb.className=`elabel k-${kind}${g.dim?' dim':''}`;
@@ -1586,6 +1641,8 @@ function cardSpec(m,mode){
   }
   return{L,h:20+L.reduce((s,x)=>s+LH[x.t],0)};
 }
+// y of a function row inside a drawn card, matching drawCard's line stepping
+function specRowY(spec,fid){let y=10;for(const ln of spec.L){if(ln.t==='fn'&&ln.f.id===fid)return y+LH.fn/2;y+=LH[ln.t];}return null;}
 function rrect(ctx,x,y,w,h,r){ctx.beginPath();ctx.moveTo(x+r,y);ctx.arcTo(x+w,y,x+w,y+h,r);ctx.arcTo(x+w,y+h,x,y+h,r);ctx.arcTo(x,y+h,x,y,r);ctx.arcTo(x,y,x+w,y,r);ctx.closePath();}
 function drawCard(ctx,m,p,spec){
   const x=p.x,y=p.y,w=NW,h=spec.h,cc=XC.cat[m.category]||XC.cat.system;
@@ -1646,11 +1703,12 @@ function renderExport(scale,maxW){
   // cross relations
   let G=[];
   if(X.links!=='off'){
-    G=crossGeom([...S.links.values()].filter(l=>l.from!==l.to&&!isTreeLink(l)&&kindShown(l.kind)&&P.has(l.from)&&P.has(l.to)),P);
+    G=wireGeom([...S.links.values()].filter(l=>l.from!==l.to&&!isTreeLink(l)&&kindShown(l.kind)&&P.has(l.from)&&P.has(l.to)),P,
+      l=>l.toFn?specRowY(specs.get(l.to),l.toFn):null);
     for(const g of G){ctx.save();ctx.strokeStyle=XC.k[g.kind];ctx.lineWidth=g.kind==='event'?2.2:g.kind==='own'?2.6:1.8;
       ctx.setLineDash(g.kind==='depend'?[7,5]:g.kind==='event'?[2,4]:[]);
-      ctx.beginPath();ctx.moveTo(g.s.x,g.s.y);ctx.quadraticCurveTo(g.mx,g.my,g.e.x,g.e.y);ctx.stroke();
-      const an=Math.atan2(g.e.y-g.my,g.e.x-g.mx);ctx.setLineDash([]);ctx.fillStyle=XC.k[g.kind];ctx.beginPath();
+      ctx.beginPath();ctx.moveTo(g.s.x,g.s.y);ctx.bezierCurveTo(g.c1.x,g.c1.y,g.c2.x,g.c2.y,g.e.x,g.e.y);ctx.stroke();
+      const an=Math.atan2(g.e.y-g.c2.y,g.e.x-g.c2.x);ctx.setLineDash([]);ctx.fillStyle=XC.k[g.kind];ctx.beginPath();
       ctx.moveTo(g.e.x,g.e.y);ctx.lineTo(g.e.x-9*Math.cos(an-.42),g.e.y-9*Math.sin(an-.42));ctx.lineTo(g.e.x-9*Math.cos(an+.42),g.e.y-9*Math.sin(an+.42));ctx.closePath();ctx.fill();ctx.restore();}
   }
   for(const m of S.managers.values()){const p=P.get(m.id);if(p)drawCard(ctx,m,p,specs.get(m.id));}
@@ -1747,7 +1805,7 @@ function renderList(){
     <h3>관계 종류</h3>
     <ul class="kinds"><li><svg viewBox="0 0 34 8" width="34" height="8" style="overflow:visible"><path d="M17,0 V4 M3,4 H31 M3,4 V8 M31,4 V8" class="tree-edge"/></svg><div><b>상위·하위</b><small>카드 배치로 표시 · 상위 매니저가 하위를 생성·소유</small></div></li>${Object.entries(KINDS).filter(([k])=>k!=='own').map(([k,v])=>`<li><svg viewBox="0 0 34 8" width="34" height="8" style="overflow:visible"><line x1="0" y1="4" x2="34" y2="4" class="edge k-${k}"/></svg><div><b>${v.label}</b><small>A → B : A가 B의 ${v.desc}</small></div></li>`).join('')}</ul>
     <h3>배치</h3>
-    <p class="hint">처음엔 상위·하위 관계에 따라 자동으로 정렬돼요. 카드를 끌면 원하는 곳에 둘 수 있고, 그때부터 페이지가 자유 배치로 바뀌어요. <b>Shift</b>를 누른 채 다른 카드 위에 놓으면 그 하위로, 빈 곳에 놓으면 독립 매니저가 돼요. 카드 아래의 <b>하위 N</b>을 누르면 가지를 접을 수 있어요. 호출·참조·이벤트 관계선은 기본으로 선택한 매니저 것만 보이고, 아래 범례를 누르면 원하는 종류만 볼 수 있어요.</p>
+    <p class="hint">처음엔 상위·하위 관계에 따라 자동으로 정렬돼요. 카드를 끌면 원하는 곳에 둘 수 있고, 그때부터 페이지가 자유 배치로 바뀌어요. <b>Shift</b>를 누른 채 다른 카드 위에 놓으면 그 하위로, 빈 곳에 놓으면 독립 매니저가 돼요. 도구막대의 <b>자동 정리</b>는 상위·하위를 유지한 채 관계선이 덜 꼬이도록 다시 배치해요. 카드 아래의 <b>하위 N</b>을 누르면 가지를 접을 수 있어요. 호출·참조·이벤트 관계선은 기본으로 선택한 매니저 것만 보이고, 아래 범례를 누르면 원하는 종류만 볼 수 있어요.</p>
     <h3>함수가 많을 때</h3>
     <p class="hint">축소하면 이름만, 평소엔 ★핵심 함수와 다른 매니저가 쓰는 함수만 보여요. 도구막대의 <b>함수 전체</b>를 켜면 Public 함수 전체가 그룹별로, <b>★핵심만</b>을 켜면 ★ 함수만 보입니다. 카드의 <b>함수 전체</b> 버튼으로 하나만 자세히 볼 수도 있어요(내 화면에만 적용). 전체 목록 관리는 상단의 <b>함수 표</b>에서 하세요.</p>`;
   const qi=$('#q');qi.oninput=()=>{S.listQ=qi.value;const p=qi.selectionStart;renderList();const n=$('#q');n.focus();n.setSelectionRange(p,p);};
@@ -2123,7 +2181,7 @@ function refresh(){
 }
 function renderAll(){
   renderTabs();
-  pt.disabled=!S.canWrite;$('#addBtn').hidden=!S.canWrite;
+  pt.disabled=!S.canWrite;$('#addBtn').hidden=!S.canWrite;$('#tidyBtn').hidden=!S.canWrite;
   $('#empty').hidden=!(S.loaded&&S.managers.size===0);
   if(!S.canWrite){$('#emptyAdd').hidden=true;$('#loadSample').hidden=true;}
   renderNodes();scheduleEdges();if(S.view==='table')renderTable();
