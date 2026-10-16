@@ -1284,28 +1284,42 @@ function treePaths(P,M,kids){
     out.push({id,ks,d});}
   return out;
 }
-// Blueprint-style wires: leave the source on the side facing the target and enter the target from the other side,
-// with horizontal tangents. Cards stacked above each other get a C-shaped wire on their right edges instead.
-// rowY(l) gives the y of the target function's row inside its card (or null) so the wire lands on that row.
+// Blueprint-style wires between card faces. Each wire crosses the wider gap between its two cards:
+// bottom→top (or top→bottom) when they sit further apart vertically, right→left (or left→right) otherwise,
+// and a C-shape on the right edges when the cards overlap. Tangents leave each face along its normal.
+// Wires sharing a face are spread along it, ordered by where their other ends are, so they leave side by
+// side instead of piling up on one point. rowY(l) gives the y of the target function's row inside its card
+// (or null) so a side entry lands on that row.
+const FACE={r:[1,0],l:[-1,0],b:[0,1],t:[0,-1]};
 function wireGeom(list,P,rowY){
-  const groups={},out=[];
-  for(const l of list){const k=[l.from,l.to].sort().join('|');(groups[k]=groups[k]||[]).push(l);}
-  for(const k in groups){const g=groups[k];
-    g.forEach((l,i)=>{
-      const A=P.get(l.from),B=P.get(l.to);if(!A||!B)return;
-      const off=(i-(g.length-1)/2)*12,ry=rowY&&rowY(l);
-      const ay=A.y+Math.min(34,A.h/2)+off,by=ry!=null?B.y+ry:B.y+Math.min(34,B.h/2)+off;
-      const dxc=(B.x+NW/2)-(A.x+NW/2);let s,e,c1,c2;
-      if(Math.abs(dxc)<NW*0.6){const t=46+Math.abs(by-ay)*0.22;
-        s={x:A.x+NW,y:ay};e={x:B.x+NW,y:by};c1={x:s.x+t,y:s.y};c2={x:e.x+t,y:e.y};}
-      else{const dir=dxc>0?1:-1;s={x:dir>0?A.x+NW:A.x,y:ay};e={x:dir>0?B.x:B.x+NW,y:by};
-        const t=Math.max(50,Math.min(240,Math.abs(e.x-s.x)*0.5+Math.abs(e.y-s.y)*0.12));
-        c1={x:s.x+dir*t,y:s.y};c2={x:e.x-dir*t,y:e.y};}
-      const kind=KINDS[l.kind]?l.kind:'call';const fn=fnOf(l.to,l.toFn);
-      out.push({l,kind,s,e,c1,c2,lx:(s.x+3*c1.x+3*c2.x+e.x)/8,ly:(s.y+3*c1.y+3*c2.y+e.y)/8,fn,
-        text:KINDS[kind].label+(fn?' · '+shortName(fn.sig):'')+(l.note?' · '+l.note:'')});
-    });
-  }
+  const W=[],out=[];
+  for(const l of list){const A=P.get(l.from),B=P.get(l.to);if(!A||!B)continue;
+    const hg=Math.max(B.x-(A.x+NW),A.x-(B.x+NW)),vg=Math.max(B.y-(A.y+A.h),A.y-(B.y+B.h));
+    let fa,fb;
+    if(vg>0&&vg>=hg)[fa,fb]=B.y>A.y?['b','t']:['t','b'];
+    else if(hg>0||Math.abs(B.x-A.x)>=NW*0.6)[fa,fb]=B.x>A.x?['r','l']:['l','r'];
+    else[fa,fb]=['r','r'];
+    const ry=rowY&&(fb==='l'||fb==='r')?rowY(l):null;
+    W.push({l,A,B,fa,fb,ry});}
+  const faces=new Map();const put=(id,f,w,end)=>{const k=id+'|'+f;if(!faces.has(k))faces.set(k,[]);faces.get(k).push({w,end});};
+  for(const w of W){put(w.l.from,w.fa,w,'s');if(w.ry==null)put(w.l.to,w.fb,w,'e');}
+  for(const [k,ends] of faces){const side='lr'.includes(k.split('|')[1]);
+    const other=x=>{const o=x.end==='s'?x.w.B:x.w.A;return side?o.y+o.h/2:o.x+NW/2;};
+    ends.sort((p,q)=>other(p)-other(q)||(p.w.l.id<q.w.l.id?-1:1));
+    ends.forEach((x,i)=>{x.w[x.end+'i']=i;x.w[x.end+'n']=ends.length;});}
+  // i-th of n slots on a face: side faces fan out around the name line, top/bottom faces across the width
+  const slot=(b,f,i,n)=>{
+    if(f==='l'||f==='r'){const step=Math.min(12,(b.h-20)/Math.max(1,n-1));
+      return{x:f==='r'?b.x+NW:b.x,y:b.y+Math.max(10,Math.min(b.h-10,Math.min(34,b.h/2)+(i-(n-1)/2)*step))};}
+    const span=Math.min(NW-48,(n-1)*24);return{x:b.x+NW/2-span/2+(n>1?span*i/(n-1):0),y:f==='b'?b.y+b.h:b.y};};
+  for(const w of W){const {l,A,B,fa,fb}=w;
+    const s=slot(A,fa,w.si,w.sn),e=w.ry!=null?{x:fb==='r'?B.x+NW:B.x,y:B.y+w.ry}:slot(B,fb,w.ei,w.en);
+    const dx=Math.abs(e.x-s.x),dy=Math.abs(e.y-s.y);
+    const t=fa===fb?46+dy*0.22:FACE[fa][0]?Math.max(50,Math.min(240,dx*0.5+dy*0.12)):Math.max(40,Math.min(200,dy*0.5+dx*0.12));
+    const c1={x:s.x+FACE[fa][0]*t,y:s.y+FACE[fa][1]*t},c2={x:e.x+FACE[fb][0]*t,y:e.y+FACE[fb][1]*t};
+    const kind=KINDS[l.kind]?l.kind:'call';const fn=fnOf(l.to,l.toFn);
+    out.push({l,kind,s,e,c1,c2,lx:(s.x+3*c1.x+3*c2.x+e.x)/8,ly:(s.y+3*c1.y+3*c2.y+e.y)/8,fn,
+      text:KINDS[kind].label+(fn?' · '+shortName(fn.sig):'')+(l.note?' · '+l.note:'')});}
   return out;
 }
 function hlFn(l,on){
