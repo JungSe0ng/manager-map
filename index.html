@@ -156,6 +156,13 @@ svg.edges{position:absolute;left:0;top:0;width:1px;height:1px;overflow:visible;p
 .n-refl.miss{color:var(--danger)}
 .refnote{background:color-mix(in srgb,var(--sel) 10%,var(--panel));border:1px solid var(--sel);border-radius:7px;padding:8px 10px;font-size:12.5px;line-height:1.5;margin-bottom:12px;display:flex;gap:8px;align-items:center;justify-content:space-between}
 .refnote .btn{flex:none;white-space:nowrap}
+.relf{display:flex;flex-wrap:wrap;gap:4px;margin:0 0 8px}
+.relf button{display:flex;align-items:center;gap:6px;border:1px solid var(--line);background:var(--raise);border-radius:14px;padding:3px 10px;font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.relf button:hover{color:var(--ink);border-color:var(--muted)}
+.relf button[aria-pressed="true"]{border-color:var(--sel);color:var(--ink);font-weight:600;background:color-mix(in srgb,var(--sel) 10%,var(--raise))}
+.relf .sw{width:14px;border-top:2px solid var(--k-call)}
+.relf .sw.k-depend{border-top-style:dashed;border-top-color:var(--k-depend)}
+.relf .sw.k-event{border-top-style:dotted;border-top-color:var(--k-event)}
 .palette{position:fixed;z-index:75;width:380px;max-width:calc(100vw - 24px);background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:10px;display:flex;flex-direction:column;gap:6px}
 .palres{list-style:none;margin:0;padding:0;max-height:min(50vh,360px);overflow:auto;display:flex;flex-direction:column;gap:1px}
 .palres .pg{font-size:11px;letter-spacing:.04em;color:var(--muted);padding:8px 8px 2px}
@@ -1000,12 +1007,15 @@ document.querySelectorAll('[data-lm]').forEach(b=>b.onclick=()=>setLinkMode(b.da
 S.kinds=new Set();try{JSON.parse(localStorage.getItem('mm.kinds')||'[]').forEach(k=>KINDS[k]&&S.kinds.add(k));}catch(e){}
 const kindShown=k=>!S.kinds.size||S.kinds.has(KINDS[k]?k:'call');
 function syncKinds(){document.querySelectorAll('.lgk').forEach(b=>b.setAttribute('aria-pressed',S.kinds.has(b.dataset.kind)));$('.legend').classList.toggle('kf',S.kinds.size>0);}
-document.querySelectorAll('.lgk').forEach(b=>b.onclick=()=>{const k=b.dataset.kind;S.kinds.has(k)?S.kinds.delete(k):S.kinds.add(k);
+// shared by the legend and the selected manager's panel, so both always show the same filter
+function setKinds(next,quiet){S.kinds=next;
   try{localStorage.setItem('mm.kinds',JSON.stringify([...S.kinds]));}catch(e){}
   // a filter with nothing drawn would look broken, so make the picked kinds visible
   if(S.kinds.size&&(S.linkMode==='none'||(S.linkMode==='sel'&&!S.sel)))setLinkMode('all');
-  syncKinds();scheduleEdges();
-  toast(S.kinds.size?[...S.kinds].map(x=>KINDS[x].label).join('·')+' 관계선만 보여요':'모든 관계선을 보여요');});
+  syncKinds();scheduleEdges();if(S.sel)renderPanel();
+  if(!quiet)toast(S.kinds.size?[...S.kinds].map(x=>KINDS[x].label).join('·')+' 관계선만 보여요':'모든 관계선을 보여요');}
+function toggleKind(k,quiet){const n=new Set(S.kinds);n.has(k)?n.delete(k):n.add(k);setKinds(n,quiet);}
+document.querySelectorAll('.lgk').forEach(b=>b.onclick=()=>toggleKind(b.dataset.kind));
 syncKinds();
 
 /* ---------- node drag: move freely; hold Shift and drop on a card to make it the parent ---------- */
@@ -1919,6 +1929,11 @@ function renderEditor(){
   $('#grpList').innerHTML=groupNames().map(g=>`<option value="${esc(g)}">`).join('');
   const others=[...S.managers.values()].filter(o=>o.id!==m.id).sort((a,b)=>(a.name||'').localeCompare(b.name||''));
   const out=[...S.links.values()].filter(l=>l.from===m.id),inc=[...S.links.values()].filter(l=>l.to===m.id);
+  // relation-kind chips: the same filter as the legend, counted for this manager
+  const kindOf=l=>KINDS[l.kind]?l.kind:'call',kc=k=>out.concat(inc).filter(l=>kindOf(l)===k).length;
+  const outF=out.filter(l=>kindShown(l.kind)),incF=inc.filter(l=>kindShown(l.kind));
+  const relFilter=out.length+inc.length?`<div class="relf" role="group" aria-label="관계 종류 필터"><button data-rk="" aria-pressed="${!S.kinds.size}">전체 ${out.length+inc.length}</button>${
+    ['call','depend','event'].filter(k=>kc(k)).map(k=>`<button data-rk="${k}" aria-pressed="${S.kinds.has(k)}"><i class="sw k-${k}"></i>${KINDS[k].label} ${kc(k)}</button>`).join('')}</div>`:'';
   const nm=id=>{const o=S.managers.get(id);return o?o.name:'(삭제됨)';};
   buildTree();const badP=descendants(m.id);badP.add(m.id);const popts=[];
   const walkP=(id,dep)=>{if(!badP.has(id))popts.push(`<option value="${esc(id)}"${d.parent===id?' selected':''}>${'　'.repeat(dep)}${esc(nm(id))}</option>`);(TREE.C.get(id)||[]).forEach(k=>walkP(k,dep+1));};
@@ -1993,7 +2008,9 @@ function renderEditor(){
     ${ro?'':isRef?'<div class="actions"><span class="spacer"></span><button class="btn danger" id="del">참조 카드 삭제</button></div>'
       :`<div class="actions"><button class="btn primary" id="save"${S.dirty?'':' disabled'}>${S.dirty?'저장':'저장됨'}</button><button class="btn" id="revert"${S.dirty?'':' disabled'}>되돌리기</button><span class="spacer"></span><button class="btn danger" id="del">매니저 삭제</button></div>`}
     <h3>관계 <span>${out.length+inc.length}개</span></h3>
-    ${out.length+inc.length?`<ul class="rels">${out.map(l=>relRow(l,'out')).join('')}${inc.map(l=>relRow(l,'in')).join('')}</ul>`:'<p class="hint">연결된 매니저가 없어요.</p>'}
+    ${relFilter}
+    ${out.length+inc.length?(outF.length+incF.length?`<ul class="rels">${outF.map(l=>relRow(l,'out')).join('')}${incF.map(l=>relRow(l,'in')).join('')}</ul>`
+      :'<p class="hint">선택한 종류의 관계가 없어요. <b>전체</b>를 누르면 모두 보여요.</p>'):'<p class="hint">연결된 매니저가 없어요.</p>'}
     ${ro?'':(others.length?`<div class="addrel">
       <select class="inp full" id="r-to" aria-label="대상 매니저"><option value="">대상 매니저 선택…</option>${others.map(o=>`<option value="${esc(o.id)}">${esc(o.name)}</option>`).join('')}</select>
       <select class="inp" id="r-kind" aria-label="관계 종류">${Object.entries(KINDS).filter(([k])=>k!=='own').map(([k,v])=>`<option value="${k}">${v.label}</option>`).join('')}</select>
@@ -2003,6 +2020,7 @@ function renderEditor(){
       <button class="btn primary full" id="r-add">관계 추가</button></div>`:'<p class="hint">관계를 만들려면 매니저를 하나 더 추가하세요.</p>')}`;
 
   $('#back').onclick=()=>select(null);
+  panel.querySelectorAll('[data-rk]').forEach(b=>b.onclick=()=>b.dataset.rk?toggleKind(b.dataset.rk,true):setKinds(new Set(),true));
   if(m.updatedAt){const n=m.updatedByName||m.updatedBy||'';$('#edited').textContent=`${n?n+' · ':''}${ago(m.updatedAt)} 수정`;$('#edited').title=m.updatedBy||'';}
   panel.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>{select(b.dataset.go,b.dataset.gofn||null);centerOn(b.dataset.go);});
   if($('#reload'))$('#reload').onclick=()=>{S.draft=clone(S.managers.get(S.sel));S.dirty=false;S.stale=false;renderPanel();};
