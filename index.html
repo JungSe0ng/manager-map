@@ -1286,17 +1286,21 @@ function treePaths(P,M,kids){
 }
 // Blueprint-style wires between card faces. Each wire crosses the wider gap between its two cards:
 // bottom→top (or top→bottom) when they sit further apart vertically, right→left (or left→right) otherwise,
-// and a C-shape on the right edges when the cards overlap. Tangents leave each face along its normal.
+// and a C-shape on the right edges when the cards overlap or a straight vertical run would cut through another
+// card. Tangents leave each face along its normal.
 // Wires sharing a face are spread along it, ordered by where their other ends are, so they leave side by
 // side instead of piling up on one point. rowY(l) gives the y of the target function's row inside its card
 // (or null) so a side entry lands on that row.
 const FACE={r:[1,0],l:[-1,0],b:[0,1],t:[0,-1]};
 function wireGeom(list,P,rowY){
   const W=[],out=[];
+  // would a vertical run between A and B cut through another card (e.g. siblings stacked in one column)?
+  const cuts=(A,B)=>{const top=Math.min(A.y+A.h,B.y+B.h),bot=Math.max(A.y,B.y),x0=Math.min(A.x,B.x)+NW*0.25,x1=Math.max(A.x,B.x)+NW*0.75;
+    for(const q of P.values())if(q!==A&&q!==B&&q.x<x1&&q.x+NW>x0&&q.y<bot&&q.y+q.h>top)return true;return false;};
   for(const l of list){const A=P.get(l.from),B=P.get(l.to);if(!A||!B)continue;
     const hg=Math.max(B.x-(A.x+NW),A.x-(B.x+NW)),vg=Math.max(B.y-(A.y+A.h),A.y-(B.y+B.h));
     let fa,fb;
-    if(vg>0&&vg>=hg)[fa,fb]=B.y>A.y?['b','t']:['t','b'];
+    if(vg>0&&vg>=hg&&!cuts(A,B))[fa,fb]=B.y>A.y?['b','t']:['t','b'];
     else if(hg>0||Math.abs(B.x-A.x)>=NW*0.6)[fa,fb]=B.x>A.x?['r','l']:['l','r'];
     else[fa,fb]=['r','r'];
     const ry=rowY&&(fb==='l'||fb==='r')?rowY(l):null;
